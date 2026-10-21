@@ -22,14 +22,18 @@ export type PerformanceSummary = z.infer<typeof PerformanceSummary>;
 export const PerformanceList = z.object({ performances: z.array(PerformanceSummary) });
 export type PerformanceList = z.infer<typeof PerformanceList>;
 
-// 경로의 id는 10진수 양의 정수만 받는다. 1e3, 0x10, 007, 1.0처럼 같은 수를 다르게 쓴 형식은 400이다.
-export const PerformanceParams = z.object({
-  id: z
-    .string()
-    .regex(/^[1-9]\d{0,15}$/)
-    .transform(Number)
-    .pipe(z.number().int().positive().max(Number.MAX_SAFE_INTEGER)),
-});
+// 경로·헤더의 id는 10진수 양의 정수만 받는다. 1e3, 0x10, 007, 1.0처럼 같은 수를 다르게 쓴 형식은 400이다.
+const IdString = z
+  .string()
+  .regex(/^[1-9]\d{0,15}$/)
+  .transform(Number)
+  .pipe(z.number().int().positive().max(Number.MAX_SAFE_INTEGER));
+
+export const PerformanceParams = z.object({ id: IdString });
+
+// 4단계 전까지 쓰는 임시 헤더다. 인증이 아니어서 누구나 다른 사람 행세를 할 수 있다(DESIGN 10장 15).
+// 다른 헤더를 지우지 않도록 looseObject로 둔다.
+export const UserHeaders = z.looseObject({ "x-user-id": IdString });
 
 export const SeatStatus = z.enum(["available", "held", "sold"]);
 export type SeatStatus = z.infer<typeof SeatStatus>;
@@ -48,3 +52,26 @@ export type SeatMapSeat = z.infer<typeof SeatMapSeat>;
 
 export const SeatMap = z.object({ performance: PerformanceSummary, seats: z.array(SeatMapSeat) });
 export type SeatMap = z.infer<typeof SeatMap>;
+
+// 1인 좌석 한도(회차당, DESIGN 10장 3). 요청 하나에 담을 수 있는 좌석 수도 같다.
+export const SEAT_LIMIT_PER_USER = 4;
+
+export const HoldRequest = z.object({
+  seatIds: z
+    .array(z.number().int().positive())
+    .min(1)
+    .max(SEAT_LIMIT_PER_USER)
+    .refine((ids) => new Set(ids).size === ids.length, "같은 좌석을 두 번 담을 수 없습니다"),
+});
+export type HoldRequest = z.infer<typeof HoldRequest>;
+
+export const HoldResponse = z.object({
+  holdId: z.number().int().positive(),
+  expiresAt: z.iso.datetime({ offset: true }),
+  seatIds: z.array(z.number().int().positive()),
+});
+export type HoldResponse = z.infer<typeof HoldResponse>;
+
+// 409의 이유. SEAT_UNAVAILABLE: 담은 좌석 중 하나라도 이미 선점·판매됐거나 이 회차의 좌석이 아니다.
+export const HoldConflict = z.object({ error: z.string(), code: z.enum(["SEAT_UNAVAILABLE"]) });
+export type HoldConflict = z.infer<typeof HoldConflict>;

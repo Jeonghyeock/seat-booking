@@ -38,5 +38,8 @@ npm run dev                               # http://127.0.0.1:3001
 | `GET /health` | DB에 닿으면 200, 아니면 503 |
 | `GET /performances` | 회차 목록(작품, 공연장, 공연 시작, 판매 시작) |
 | `GET /performances/:id/seats` | 좌석 지도(구역·열·번호·등급·가격·판매 상태), 없는 회차는 404 |
+| `POST /performances/:id/holds` | 좌석 1~4개 선점(5분). 전부 잡거나 하나도 잡지 않는다. 이미 선점된 좌석이 있으면 409 |
 
 요청과 응답은 `packages/shared`의 zod 스키마로 검증한다.
+
+4단계(인증) 전까지는 `X-User-Id` 헤더로 사용자를 가린다. 인증이 아닌 임시 방식이다.

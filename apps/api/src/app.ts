@@ -3,6 +3,7 @@ import Fastify, { type FastifyError, type FastifyServerOptions } from "fastify";
 import { serializerCompiler, validatorCompiler, type ZodTypeProvider } from "fastify-type-provider-zod";
 import type pg from "pg";
 import { createDb } from "./db/client.js";
+import { holdRoutes } from "./routes/holds.js";
 import { performanceRoutes } from "./routes/performances.js";
 
 export function buildApp(pool: pg.Pool, options: FastifyServerOptions = {}) {
@@ -35,7 +36,9 @@ export function buildApp(pool: pg.Pool, options: FastifyServerOptions = {}) {
     },
   );
 
-  app.register(performanceRoutes, { db: createDb(pool) });
+  const db = createDb(pool);
+  app.register(performanceRoutes, { db });
+  app.register(holdRoutes, { db });
 
   return app;
 }
