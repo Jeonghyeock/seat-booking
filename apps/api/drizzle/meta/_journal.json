@@ -15,6 +15,13 @@
       "when": 1792565560364,
       "tag": "0001_performances",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792567539709,
+      "tag": "0002_holds",
+      "breakpoints": true
     }
   ]
 }

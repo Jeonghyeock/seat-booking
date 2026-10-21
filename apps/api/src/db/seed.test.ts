@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, inject, it } from "vitest";
 import { createDb } from "./client.js";
 import { createPool } from "./pool.js";
@@ -78,11 +79,79 @@ describe("제약 조건", () => {
     return seed(db, data);
   }
 
+  async function newHold(performanceId: number) {
+    const user = await pool.query<{ id: number }>("insert into users (email) values ($1) returning id", [
+      `${randomUUID()}@test.local`,
+    ]);
+    const hold = await pool.query<{ id: number }>(
+      "insert into holds (user_id, performance_id, expires_at) values ($1, $2, now() + interval '5 minutes') returning id",
+      [user.rows[0]!.id, performanceId],
+    );
+    return hold.rows[0]!.id;
+  }
+
+  // check 제약이 여럿이면 PostgreSQL은 이름의 알파벳 순서로 검사한다. 어느 제약에 걸렸는지 이름까지 확인한다.
   it("판매 상태는 available·held·sold만 된다(23514)", async () => {
     const { performanceIds } = await onePerformance();
+    const holdId = await newHold(performanceIds[0]!);
     await expect(
-      pool.query("update performance_seats set status = 'reserved' where performance_id = $1", [performanceIds[0]]),
-    ).rejects.toMatchObject({ code: "23514" });
+      pool.query(
+        "update performance_seats set status = 'reserved', hold_id = $2, hold_expires_at = now() where performance_id = $1",
+        [performanceIds[0], holdId],
+      ),
+    ).rejects.toMatchObject({ code: "23514", constraint: "performance_seats_status_valid" });
+  });
+
+  it("빈 좌석에만 선점이 없다(23514)", async () => {
+    const { performanceIds } = await onePerformance();
+    const holdId = await newHold(performanceIds[0]!);
+    await expect(
+      pool.query("update performance_seats set status = 'held' where performance_id = $1", [performanceIds[0]]),
+    ).rejects.toMatchObject({ code: "23514", constraint: "performance_seats_hold_matches_status" });
+    await expect(
+      pool.query("update performance_seats set hold_id = $2, hold_expires_at = now() where performance_id = $1", [
+        performanceIds[0],
+        holdId,
+      ]),
+    ).rejects.toMatchObject({ code: "23514", constraint: "performance_seats_hold_matches_status" });
+  });
+
+  it("선점 id와 선점 만료 시각은 함께 있거나 함께 없다(23514)", async () => {
+    const { performanceIds } = await onePerformance();
+    const holdId = await newHold(performanceIds[0]!);
+    await expect(
+      pool.query("update performance_seats set status = 'held', hold_id = $2 where performance_id = $1", [
+        performanceIds[0],
+        holdId,
+      ]),
+    ).rejects.toMatchObject({ code: "23514", constraint: "performance_seats_hold_fields_together" });
+  });
+
+  it("선점한 좌석은 팔린 뒤에도 선점을 가리킨다", async () => {
+    const { performanceIds } = await onePerformance();
+    const holdId = await newHold(performanceIds[0]!);
+    await pool.query(
+      "update performance_seats set status = 'held', hold_id = $2, hold_expires_at = now() where performance_id = $1",
+      [performanceIds[0], holdId],
+    );
+    await expect(
+      pool.query("update performance_seats set status = 'sold' where performance_id = $1", [performanceIds[0]]),
+    ).resolves.toMatchObject({ rowCount: 98 });
+  });
+
+  it("없는 선점이나 사용자를 가리킬 수 없다(23503)", async () => {
+    const { performanceIds } = await onePerformance();
+    await expect(
+      pool.query(
+        "update performance_seats set status = 'held', hold_id = 999999999, hold_expires_at = now() where performance_id = $1",
+        [performanceIds[0]],
+      ),
+    ).rejects.toMatchObject({ code: "23503", constraint: "performance_seats_hold_id_holds_id_fk" });
+    await expect(
+      pool.query("insert into holds (user_id, performance_id, expires_at) values (999999999, $1, now())", [
+        performanceIds[0],
+      ]),
+    ).rejects.toMatchObject({ code: "23503", constraint: "holds_user_id_users_id_fk" });
   });
 
   it("판매 시작은 공연 시작보다 앞서야 한다(23514)", async () => {
