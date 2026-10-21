@@ -70,14 +70,14 @@
 
 | 테이블 | 핵심 열 | 비고 |
 |---|---|---|
-| `users` | email(unique), password_hash, role | role: customer / admin |
+| `users` | email(unique), password_hash, role | role: customer / admin. 2단계에서 id·email만으로 먼저 만들고(선점이 가리킬 사용자), password_hash·role은 4단계에서 더한다 |
 | `sessions` | id(무작위 32바이트), user_id, expires_at | 4단계 |
 | `venues`, `seats` | 구역·열·번호, 등급 | 시드 JSON |
 | `shows` | title | 공연 작품. 1단계에서 더함(회차에 제목을 두면 회차마다 되풀이된다) |
 | `performances` | show_id, venue_id, starts_at, sales_open_at | 회차 |
 | `performance_grades` | (performance_id, grade) PK, price | 회차별 등급 가격. 1단계에서 더함(가격은 좌석이 아니라 등급마다 정해진다) |
-| `performance_seats` | (performance_id, seat_id) PK, status | 좌석 재고. status: available / held / sold. 선점용 hold_id·hold_expires_at은 2단계 마이그레이션에서 더한다 |
-| `holds` | user_id, performance_id, expires_at | 선점 묶음 |
+| `performance_seats` | (performance_id, seat_id) PK, status, hold_id, hold_expires_at | 좌석 재고. status: available / held / sold. 빈 좌석에만 hold_id가 없다(팔린 좌석은 어느 선점에서 팔렸는지 남긴다). 만료 시각은 holds와 이 표에 함께 둔다(6.1) |
+| `holds` | user_id, performance_id, expires_at | 선점 묶음. 요청 하나로 잡은 좌석들이 같은 hold를 가리킨다 |
 | `orders` | user_id, hold_id, status, amount | pending / paid / cancelled / refunded |
 | `payments` | order_id, provider_ref(unique), status | 웹훅 중복을 provider_ref로 거름 |
 | `tickets` | order_id, performance_id, seat_id, status | **부분 unique 인덱스** `(performance_id, seat_id) WHERE status = 'valid'` |
@@ -98,6 +98,10 @@
 | ④ DB 불변식 | `tickets`의 부분 unique 인덱스 | ③과 **함께** 둔다. 앱 코드에 버그가 있어도 DB가 중복 판매를 거부한다 |
 
 - 만료를 부분 인덱스 조건에 넣을 수 없는 이유: 인덱스 조건의 함수는 IMMUTABLE이어야 하는데 `now()`는 그렇지 않다. 그래서 만료는 ③의 `WHERE`에서 판단하고, 정리 작업이 만료된 선점을 주기적으로 풀어 좌석 지도의 숫자를 맞춘다. 정리 작업은 `FOR UPDATE SKIP LOCKED`로 몇 행씩 처리한다.
+- **여러 좌석을 한 번에 선점한다.** 요청 하나는 1~4석을 전부 잡거나 하나도 잡지 않는다. 한 트랜잭션 안에서 대상 좌석을 좌석 id 순서로 `FOR UPDATE` 잠그고, 같은 문장에서 ③의 조건부 `UPDATE`를 한다. 바뀐 행 수가 요청한 좌석 수보다 적으면 `ROLLBACK`하고 409를 돌려준다.
+- **교착을 막는 잠금 순서.** 두 요청이 좌석 1과 3을 서로 반대 순서로 잠그면, 각자 하나를 쥔 채 상대의 것을 기다려 교착(40P01)이 된다. PostgreSQL은 `deadlock_timeout`(기본 1초) 뒤 한쪽을 실패시킨다. 모든 요청이 좌석 id 순서로 잠그면 기다림이 고리를 이루지 않는다. 1인 한도를 지키려고 사용자 단위 잠금을 더하면, 그 잠금은 좌석 잠금보다 **먼저** 잡는다. 순서가 "사용자 → 좌석 id 순" 하나뿐이라 고리가 생기지 않는다.
+- **만료 시각을 좌석 재고 행에도 두는 이유.** READ COMMITTED에서 겹친 `UPDATE`는 앞 트랜잭션이 끝날 때까지 기다린 뒤, 고치려는 행의 새 값으로 `WHERE`를 다시 본다. 이때 다른 표는 문장을 시작할 때의 스냅샷으로 본다. 만료 시각이 `holds`에만 있으면 조건이 `holds`를 봐야 하는데, 앞 트랜잭션이 막 넣은 선점은 그 스냅샷에 없다. 조건을 "유효한 선점이 없으면"처럼 쓰면 두 요청이 모두 선점한다. 그래서 만료 판단에 쓰는 값을 같은 행(`hold_expires_at`)에 둔다. 두 곳의 값은 같은 트랜잭션에서 한 번 쓰고 바꾸지 않는다(선점 연장은 없다).
+- **만료된 선점은 좌석 지도에서 바로 빈 좌석으로 보인다.** 조회할 때 `hold_expires_at`을 보고 바꿔 보여 준다. 행을 실제로 푸는 정리 작업은 3단계에서 한다.
 - **1인 좌석 한도(C6)는 별개의 동시성 문제다.** 서로 다른 좌석을 동시에 선점하면 ③만으로는 "지금 몇 장 쥐고 있나" 확인이 겹친다. 후보는 세 가지다.
   - 사용자·회차 단위 advisory lock(`pg_advisory_xact_lock`)
   - 사용자·회차 행을 `FOR UPDATE`로 잠그기
@@ -177,7 +181,7 @@ seat-booking/
 ## 10. 정한 것 (2026-10-21, 권장안 채택)
 
 1. 저장소 이름: `seat-booking`.
-2. 선점 유지 시간: 5분. 테스트에서는 설정으로 짧게 바꾼다.
+2. 선점 유지 시간: 5분. 테스트에서는 기다리지 않고 만료 시각을 SQL로 과거로 돌린다(2단계에서 바꿈. 처음에는 "설정으로 짧게 바꾼다"였다).
 3. 1인 좌석 한도: 회차당 4석.
 4. 배포: 하지 않는다. 로컬과 CI로 끝내고, 7단계 뒤에 다시 판단한다.
 5. 대기열: v1에서 뺀다. 6단계 측정을 보고 다시 정한다.
@@ -195,3 +199,9 @@ seat-booking/
 11. 데이터 모델에 `shows`(공연 작품)와 `performance_grades`(회차별 등급 가격)를 더한다. 제목과 가격을 회차·좌석마다 되풀이하지 않기 위해서다. `performance_seats`에는 판매 상태만 둔다.
 12. PostgreSQL의 bigint(int8)는 node-postgres가 기본으로 문자열로 돌려준다. id뿐 아니라 `count(*)`도 int8이다. 연결 풀을 만드는 한 곳에서 int8을 number로 바꾸고, `Number.MAX_SAFE_INTEGER`를 넘으면 오류를 낸다. Drizzle 스키마의 `mode: "number"`와 직접 쓴 SQL의 int8 결과가 같은 타입이 된다. 예외: int8 배열(`bigint[]`)과 numeric(`sum(bigint)`, `avg`)은 여전히 문자열이고, `pg_stat_statements.queryid`처럼 int8 범위 전체를 쓰는 값은 이 변환에서 오류가 난다. 그런 열은 SQL에서 `::text`로 바꿔 읽는다.
 13. 요청·응답 스키마는 `packages/shared`의 zod로 정의하고, Fastify에는 fastify-type-provider-zod로 붙인다. 이 패키지는 `@fastify/swagger`를 필수 peer로 끌어온다(지금은 OpenAPI 문서를 만들지 않는다).
+
+2단계에서 더한 것(2026-10-21):
+
+14. `users`를 2단계에서 id·email만으로 먼저 만든다. 선점이 가리킬 사용자가 필요해서다. 비밀번호·세션·역할은 4단계에서 더한다.
+15. 4단계 전까지 API는 `X-User-Id` 헤더로 사용자를 가린다. 누구나 다른 사람 행세를 할 수 있는 임시 방식이고, 4단계에서 세션 쿠키로 바꾼다. 헤더가 없거나 형식이 틀리면 400, 없는 사용자면 401이다.
+16. 팔린 좌석은 선점(`hold_id`)을 남긴다. 제약은 `(status = 'available') = (hold_id is null)`과 `(hold_id is null) = (hold_expires_at is null)` 두 개다. 3단계에서 제약을 다시 바꾸지 않도록 지금 정한다.
