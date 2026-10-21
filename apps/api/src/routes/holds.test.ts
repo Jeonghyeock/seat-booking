@@ -112,7 +112,8 @@ describe("POST /performances/:id/holds", () => {
 
 // 합격 기준(DESIGN 3장)은 응답 개수만이 아니라 DB를 직접 조회해 확인한다.
 describe("동시 선점", () => {
-  const pool = createPool({ connectionString: inject("databaseUrl") });
+  // 풀이 기본값(10)이면 DB에서 겹치는 요청은 10개뿐이다. 잠금을 기다렸다가 조건을 다시 보는 요청이 더 많아지도록 키운다.
+  const pool = createPool({ connectionString: inject("databaseUrl"), max: 50 });
   const app = buildApp(pool);
   afterAll(async () => {
     await app.close();
@@ -151,6 +152,26 @@ describe("동시 선점", () => {
     expect(rows[0]).toEqual({ held: 1, hold_id: winner.holdId, holds: 1 });
   }, 60_000);
 
+  it("만료된 선점에서 시작해도, 200명이 동시에 다시 선점하면 201은 정확히 1개", async () => {
+    const { performanceId, seatIds } = await newPerformance(pool);
+    const [first, ...others] = await newUsers(pool, 201);
+    const old = HoldResponse.parse((await hold(performanceId, first!, [seatIds[0]!])).json());
+    await pool.query("update holds set expires_at = now() - interval '1 second' where id = $1", [old.holdId]);
+    await pool.query("update performance_seats set hold_expires_at = now() - interval '1 second' where hold_id = $1", [
+      old.holdId,
+    ]);
+
+    // 좌석은 held 그대로라, 겹친 요청은 기다린 뒤 status가 아니라 hold_expires_at으로 다시 판단해야 한다
+    const responses = await Promise.all(others.map((u) => hold(performanceId, u, [seatIds[0]!])));
+    expect(countStatuses(responses.map((r) => r.statusCode))).toEqual({ 201: 1, 409: 199 });
+    const winner = HoldResponse.parse(responses.find((r) => r.statusCode === 201)!.json());
+    const { rows } = await pool.query(
+      "select hold_id from performance_seats where performance_id = $1 and seat_id = $2",
+      [performanceId, seatIds[0]],
+    );
+    expect(rows[0].hold_id).toBe(winner.holdId);
+  }, 60_000);
+
   it("C2: 좌석 20개에 400명이 1~4석씩 몰려도 같은 좌석을 두 사람이 선점하지 않는다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
     const contested = seatIds.slice(0, 20);
@@ -180,6 +201,8 @@ describe("동시 선점", () => {
     expect(holds.rows[0].n).toBe(winners.length);
   }, 60_000);
 
+  // 요청에 담긴 순서는 잠금 순서를 바꾸지 못한다(SQL이 좌석 id로 정렬해 잠근다). 이 테스트는 좌석을 담긴 순서대로
+  // 하나씩 잠그는 구현으로 바뀌는 것을 잡는다. SQL 안의 잠금 순서는 hold-races.test.ts의 실행 계획 테스트가 지킨다.
   it("좌석을 서로 반대 순서로 담은 요청이 동시에 와도 교착 없이 끝난다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
     const users = await newUsers(pool, 200);

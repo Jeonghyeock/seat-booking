@@ -32,7 +32,7 @@ const IdString = z
 export const PerformanceParams = z.object({ id: IdString });
 
 // 4단계 전까지 쓰는 임시 헤더다. 인증이 아니어서 누구나 다른 사람 행세를 할 수 있다(DESIGN 10장 15).
-// 다른 헤더를 지우지 않도록 looseObject로 둔다.
+// Fastify는 검증한 값을 원래 헤더 위에 덧씌우므로 다른 헤더가 지워지지는 않는다. looseObject는 다른 헤더도 타입에 남긴다.
 export const UserHeaders = z.looseObject({ "x-user-id": IdString });
 
 export const SeatStatus = z.enum(["available", "held", "sold"]);
