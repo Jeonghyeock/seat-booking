@@ -72,6 +72,8 @@ export const HoldResponse = z.object({
 });
 export type HoldResponse = z.infer<typeof HoldResponse>;
 
-// 409의 이유. SEAT_UNAVAILABLE: 담은 좌석 중 하나라도 이미 선점·판매됐거나 이 회차의 좌석이 아니다.
-export const HoldConflict = z.object({ error: z.string(), code: z.enum(["SEAT_UNAVAILABLE"]) });
+// 409의 이유.
+// SEAT_UNAVAILABLE: 담은 좌석 중 하나라도 이미 선점·판매됐거나 이 회차의 좌석이 아니다.
+// HOLD_LIMIT: 이 회차에 이미 쥔 좌석과 합치면 1인 한도를 넘는다.
+export const HoldConflict = z.object({ error: z.string(), code: z.enum(["SEAT_UNAVAILABLE", "HOLD_LIMIT"]) });
 export type HoldConflict = z.infer<typeof HoldConflict>;
