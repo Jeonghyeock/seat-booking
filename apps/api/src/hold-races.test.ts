@@ -196,19 +196,25 @@ describe("holdSeats는 실행 계획이 달라도 좌석 id 순서로 잠근다"
 
   it("두 요청이 좌석을 서로 다른 순서로 읽어도 교착 없이 하나만 선점한다", async () => {
     const { performanceId, seatIds } = await newPerformance(admin);
-    const [s1, s2] = [seatIds[0]!, seatIds[1]!];
+    const s1 = seatIds[0]!;
     const [ua, ub] = await newUsers(admin, 2);
 
-    // s1 행을 고쳐 새 버전이 s2 뒤에 놓이게 한다. 표를 처음부터 읽으면 s2를 먼저 만난다.
-    await admin.query("update performance_seats set status = status where performance_id = $1 and seat_id = $2", [
-      performanceId,
-      s1,
-    ]);
-    const physical = await admin.query<{ seat_id: number }>(
-      "select seat_id from performance_seats where performance_id = $1 and seat_id = any($2::bigint[]) order by ctid",
-      [performanceId, [s1, s2]],
-    );
-    expect(physical.rows.map((r) => r.seat_id)).toEqual([s2, s1]);
+    // 좌석 id가 가장 작은 s1을 고쳐, 새 버전이 이 회차의 다른 좌석 뒤에 놓이게 한다. 새 버전이 어디에 놓일지는
+    // 페이지의 빈자리에 달려 있어서(다른 테스트가 같은 페이지를 고치면 비워진 줄 번호가 다시 쓰인다) 맨 앞이 아닐 때까지 고친다.
+    // 그때 맨 앞에 놓인 좌석이 s2다. 좌석 id로는 s1 뒤지만, 표를 처음부터 읽으면 s1보다 먼저 나온다.
+    let s2 = s1;
+    for (let i = 0; i < 10 && s2 === s1; i++) {
+      await admin.query("update performance_seats set status = status where performance_id = $1 and seat_id = $2", [
+        performanceId,
+        s1,
+      ]);
+      const first = await admin.query<{ seat_id: number }>(
+        "select seat_id from performance_seats where performance_id = $1 order by ctid limit 1",
+        [performanceId],
+      );
+      s2 = first.rows[0]!.seat_id;
+    }
+    expect(s2).not.toBe(s1);
 
     // 두 연결이 정말 다른 방법으로 읽는지 확인한다. 같은 방법이면 잠금 순서가 같아져 이 테스트는 아무것도 시험하지 못한다.
     const scanOf = async (p: pg.Pool) =>
