@@ -16,7 +16,7 @@ describe("GET /health", () => {
     expect(res.json()).toEqual({ status: "ok" });
   });
 
-  it("DB에 닿지 않으면 500", async () => {
+  it("DB에 닿지 않으면 503, 오류 내용은 응답에 없음", async () => {
     const down = new pg.Pool({
       connectionString: "postgres://nobody:nothing@127.0.0.1:1/none",
       connectionTimeoutMillis: 1000,
@@ -24,7 +24,8 @@ describe("GET /health", () => {
     const broken = buildApp(down);
     try {
       const res = await broken.inject({ method: "GET", url: "/health" });
-      expect(res.statusCode).toBe(500);
+      expect(res.statusCode).toBe(503);
+      expect(res.json()).toEqual({ status: "unavailable" });
     } finally {
       await broken.close();
       await down.end();
