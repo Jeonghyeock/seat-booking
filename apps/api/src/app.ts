@@ -2,6 +2,8 @@ import { HealthResponse, HealthUnavailable } from "@seat-booking/shared";
 import Fastify, { type FastifyServerOptions } from "fastify";
 import { serializerCompiler, validatorCompiler, type ZodTypeProvider } from "fastify-type-provider-zod";
 import type pg from "pg";
+import { createDb } from "./db/client.js";
+import { performanceRoutes } from "./routes/performances.js";
 
 export function buildApp(pool: pg.Pool, options: FastifyServerOptions = {}) {
   // 요청은 packages/shared의 zod 스키마로 검증하고, 응답도 같은 스키마로 직렬화한다.
@@ -23,6 +25,8 @@ export function buildApp(pool: pg.Pool, options: FastifyServerOptions = {}) {
       }
     },
   );
+
+  app.register(performanceRoutes, { db: createDb(pool) });
 
   return app;
 }

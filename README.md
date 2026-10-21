@@ -26,6 +26,17 @@ CREATE DATABASE seat_booking OWNER seat_booking;
 ```sh
 npm ci
 npm run db:migrate -w @seat-booking/api   # 마이그레이션(apps/api/drizzle/)
+npm run db:seed -w @seat-booking/api      # 샘플 공연장·회차로 개발 DB를 다시 채운다
 npm test                                  # 템플릿 DB를 복제한 테스트 DB에서 돌고, 끝나면 지운다
-npm run dev                               # http://127.0.0.1:3001/health
+npm run dev                               # http://127.0.0.1:3001
 ```
+
+## API
+
+| 경로 | 내용 |
+|---|---|
+| `GET /health` | DB에 닿으면 200, 아니면 503 |
+| `GET /performances` | 회차 목록(작품, 공연장, 공연 시작, 판매 시작) |
+| `GET /performances/:id/seats` | 좌석 지도(구역·열·번호·등급·가격·판매 상태), 없는 회차는 404 |
+
+요청과 응답은 `packages/shared`의 zod 스키마로 검증한다.
