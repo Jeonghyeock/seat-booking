@@ -1,9 +1,22 @@
-import { ErrorResponse, HoldConflict, HoldRequest, HoldResponse, PerformanceParams, UserHeaders } from "@seat-booking/shared";
+import {
+  ErrorResponse,
+  HoldConflict,
+  HoldRequest,
+  HoldResponse,
+  PerformanceParams,
+  SEAT_LIMIT_PER_USER,
+  UserHeaders,
+} from "@seat-booking/shared";
 import { eq } from "drizzle-orm";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import type { Db } from "../db/client.js";
 import { performances, users } from "../db/schema.js";
-import { holdSeats } from "../holds.js";
+import { type HoldFailure, holdSeats } from "../holds.js";
+
+const CONFLICT_MESSAGES: Record<HoldFailure, string> = {
+  SEAT_UNAVAILABLE: "이미 선점되었거나 이 회차에 없는 좌석이 있습니다",
+  HOLD_LIMIT: `한 회차에 ${SEAT_LIMIT_PER_USER}석까지 선점할 수 있습니다`,
+};
 
 export const holdRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db }) => {
   app.post(
@@ -30,7 +43,7 @@ export const holdRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db })
 
       const result = await holdSeats(db, { userId, performanceId, seatIds: request.body.seatIds });
       if (!result.ok) {
-        return reply.code(409).send({ error: "이미 선점되었거나 이 회차에 없는 좌석이 있습니다", code: result.code });
+        return reply.code(409).send({ error: CONFLICT_MESSAGES[result.code], code: result.code });
       }
       return reply.code(201).send({
         holdId: result.holdId,
