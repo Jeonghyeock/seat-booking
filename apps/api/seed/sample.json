@@ -1,0 +1,42 @@
+{
+  "venue": {
+    "name": "샘플 아트홀",
+    "rows": [
+      { "section": "1층", "row": "A", "seats": 10, "grade": "VIP" },
+      { "section": "1층", "row": "B", "seats": 10, "grade": "VIP" },
+      { "section": "1층", "row": "C", "seats": 12, "grade": "R" },
+      { "section": "1층", "row": "D", "seats": 12, "grade": "R" },
+      { "section": "1층", "row": "E", "seats": 12, "grade": "R" },
+      { "section": "2층", "row": "A", "seats": 14, "grade": "S" },
+      { "section": "2층", "row": "B", "seats": 14, "grade": "S" },
+      { "section": "2층", "row": "C", "seats": 14, "grade": "S" }
+    ]
+  },
+  "shows": [
+    {
+      "title": "뮤지컬 〈샘플〉",
+      "performances": [
+        {
+          "startsAt": "2026-12-19T19:30:00+09:00",
+          "salesOpenAt": "2026-11-20T20:00:00+09:00",
+          "prices": { "VIP": 150000, "R": 120000, "S": 90000 }
+        },
+        {
+          "startsAt": "2026-12-20T14:00:00+09:00",
+          "salesOpenAt": "2026-11-20T20:00:00+09:00",
+          "prices": { "VIP": 150000, "R": 120000, "S": 90000 }
+        }
+      ]
+    },
+    {
+      "title": "샘플 오케스트라 송년 음악회",
+      "performances": [
+        {
+          "startsAt": "2026-12-31T20:00:00+09:00",
+          "salesOpenAt": "2026-12-01T12:00:00+09:00",
+          "prices": { "VIP": 120000, "R": 90000, "S": 60000 }
+        }
+      ]
+    }
+  ]
+}

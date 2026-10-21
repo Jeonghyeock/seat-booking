@@ -7,6 +7,7 @@
     "start": "tsx --env-file-if-exists=../../.env src/main.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx --env-file-if-exists=../../.env src/db/migrate-cli.ts",
+    "db:seed": "tsx --env-file-if-exists=../../.env src/db/seed-cli.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
