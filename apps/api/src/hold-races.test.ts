@@ -29,7 +29,7 @@ describe("선점 경쟁을 한 단계씩 재현", () => {
 
   // 그 연결이 다른 트랜잭션의 잠금을 기다리기 시작할 때까지 기다린다.
   async function waitUntilBlocked(pid: number) {
-    for (let i = 0; i < 500; i++) {
+    for (let i = 0; i < 300; i++) {
       const { rows } = await pool.query("select cardinality(pg_blocking_pids($1)) > 0 as blocked", [pid]);
       if (rows[0].blocked) return;
       await new Promise((r) => setTimeout(r, 10));
@@ -162,7 +162,7 @@ describe("선점 경쟁을 한 단계씩 재현", () => {
       expect(deadlocked).toHaveLength(1);
       expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     });
-  });
+  }, 15_000);
 });
 
 // holdSeats는 좌석을 좌석 id 순서로 잠근다(ORDER BY … FOR UPDATE). 이 순서가 실행 계획에 기대지 않는다는 것을 확인한다.
@@ -170,7 +170,11 @@ describe("선점 경쟁을 한 단계씩 재현", () => {
 describe("holdSeats는 실행 계획이 달라도 좌석 id 순서로 잠근다", () => {
   const url = inject("databaseUrl");
   const admin = createPool({ connectionString: url });
-  const byIndex = createPool({ connectionString: url, application_name: "hold-order-index" });
+  const byIndex = createPool({
+    connectionString: url,
+    application_name: "hold-order-index",
+    options: "-c enable_seqscan=off -c enable_bitmapscan=off",
+  });
   const bySeqScan = createPool({
     connectionString: url,
     application_name: "hold-order-seqscan",
@@ -179,9 +183,10 @@ describe("holdSeats는 실행 계획이 달라도 좌석 id 순서로 잠근다"
   afterAll(() => Promise.all([admin.end(), byIndex.end(), bySeqScan.end()]));
 
   async function waitForLockWaiters(count: number) {
-    for (let i = 0; i < 500; i++) {
+    for (let i = 0; i < 300; i++) {
       const { rows } = await admin.query(
-        "select count(*) as n from pg_stat_activity where application_name like 'hold-order-%' and wait_event_type = 'Lock'",
+        `select count(*) as n from pg_stat_activity
+          where datname = current_database() and application_name like 'hold-order-%' and wait_event_type = 'Lock'`,
       );
       if (rows[0].n === count) return;
       await new Promise((r) => setTimeout(r, 10));
@@ -204,6 +209,19 @@ describe("holdSeats는 실행 계획이 달라도 좌석 id 순서로 잠근다"
       [performanceId, [s1, s2]],
     );
     expect(physical.rows.map((r) => r.seat_id)).toEqual([s2, s1]);
+
+    // 두 연결이 정말 다른 방법으로 읽는지 확인한다. 같은 방법이면 잠금 순서가 같아져 이 테스트는 아무것도 시험하지 못한다.
+    const scanOf = async (p: pg.Pool) =>
+      (
+        await p.query(
+          "explain select seat_id from performance_seats where performance_id = $1 and seat_id = any($2::bigint[]) for update",
+          [performanceId, [s1, s2]],
+        )
+      ).rows
+        .map((r) => r["QUERY PLAN"])
+        .join("\n");
+    expect(await scanOf(byIndex)).toMatch(/Index Scan using performance_seats_performance_id_seat_id_pk/);
+    expect(await scanOf(bySeqScan)).toMatch(/Seq Scan on performance_seats/);
 
     // 세 번째 연결이 s1을 먼저 쥐어, A와 B가 기다리는 순서를 정한다.
     const holder = await admin.connect();
@@ -235,5 +253,5 @@ describe("holdSeats는 실행 계획이 달라도 좌석 id 순서로 잠근다"
       await holder.query("rollback").catch(() => {});
       holder.release();
     }
-  });
+  }, 15_000);
 });

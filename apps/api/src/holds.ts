@@ -17,6 +17,7 @@ class SeatUnavailable extends Error {}
 // 2. 한 문장에서 좌석을 좌석 id 순서로 잠그고(locked), 빈 좌석이거나 만료된 선점인 좌석만 바꾼다.
 //    잠금 순서가 요청마다 같아서 여러 좌석을 잠가도 교착이 생기지 않는다.
 //    다른 요청이 쥔 좌석이면 그 트랜잭션이 끝날 때까지 기다린 뒤, 바뀐 행 값으로 조건을 다시 본다.
+//    now()는 트랜잭션을 시작한 시각이다. 잠금을 오래 기다리는 사이 만료된 선점은 아직 유효해 보여 409가 날 수 있다(안전한 쪽으로 틀린다).
 // 3. 바뀐 좌석이 담은 수보다 적으면 예외로 트랜잭션을 되돌린다. 1의 선점 행도 함께 사라진다.
 export async function holdSeats(db: Db, { userId, performanceId, seatIds }: HoldInput): Promise<HoldResult> {
   try {
