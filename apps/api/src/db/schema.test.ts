@@ -1,8 +1,8 @@
-import pg from "pg";
+import { createPool } from "./pool.js";
 import { afterAll, describe, expect, inject, it } from "vitest";
 
 describe("첫 마이그레이션", () => {
-  const pool = new pg.Pool({ connectionString: inject("databaseUrl") });
+  const pool = createPool({ connectionString: inject("databaseUrl") });
   afterAll(() => pool.end());
 
   it("venues·seats 테이블을 만든다", async () => {

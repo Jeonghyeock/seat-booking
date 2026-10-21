@@ -1,9 +1,9 @@
-import pg from "pg";
+import { createPool } from "./db/pool.js";
 import { afterAll, describe, expect, inject, it } from "vitest";
 import { buildApp } from "./app.js";
 
 describe("GET /health", () => {
-  const pool = new pg.Pool({ connectionString: inject("databaseUrl") });
+  const pool = createPool({ connectionString: inject("databaseUrl") });
   const app = buildApp(pool);
   afterAll(async () => {
     await app.close();
@@ -17,7 +17,7 @@ describe("GET /health", () => {
   });
 
   it("DB에 닿지 않으면 503, 오류 내용은 응답에 없음", async () => {
-    const down = new pg.Pool({
+    const down = createPool({
       connectionString: "postgres://nobody:nothing@127.0.0.1:1/none",
       connectionTimeoutMillis: 1000,
     });

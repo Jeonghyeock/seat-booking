@@ -1,4 +1,4 @@
-import pg from "pg";
+import { createPool } from "./db/pool.js";
 import { buildApp } from "./app.js";
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -8,7 +8,7 @@ if (!databaseUrl) throw new Error("DATABASE_URL이 없습니다(.env 또는 환�
 const port = Number(process.env.PORT ?? 3001);
 const host = process.env.HOST ?? "127.0.0.1";
 
-const pool = new pg.Pool({ connectionString: databaseUrl });
+const pool = createPool({ connectionString: databaseUrl });
 const app = buildApp(pool, { logger: true });
 app.addHook("onClose", async () => {
   await pool.end();
