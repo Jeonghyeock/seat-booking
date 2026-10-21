@@ -40,9 +40,16 @@ export function readSeedFile(path: URL): SeedData {
 
 export const SAMPLE_SEED = new URL("../../seed/sample.json", import.meta.url);
 
+export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
 // 공연장·좌석·작품·회차·등급 가격을 넣고, 회차마다 그 공연장의 좌석으로 재고를 만든다. 전부 한 트랜잭션이다.
+export function seed(db: Db, data: SeedData) {
+  return db.transaction((tx) => seedInto(tx, data));
+}
+
+// 이미 연 트랜잭션 안에서 넣는다. 중간에 실패하면 그 트랜잭션 전체가 되돌려진다.
 // 좌석이 회차의 공연장 것인지는 DB 제약 대신 여기서 지킨다(재고를 그 공연장의 좌석에서만 뽑는다).
-export async function seed(db: Db, data: SeedData) {
+export async function seedInto(tx: Tx, data: SeedData) {
   const grades = new Set(data.venue.rows.map((r) => r.grade));
   for (const show of data.shows) {
     for (const p of show.performances) {
@@ -51,42 +58,40 @@ export async function seed(db: Db, data: SeedData) {
     }
   }
 
-  return db.transaction(async (tx) => {
-    const [venue] = await tx.insert(venues).values({ name: data.venue.name }).returning({ id: venues.id });
-    const venueId = venue!.id;
+  const [venue] = await tx.insert(venues).values({ name: data.venue.name }).returning({ id: venues.id });
+  const venueId = venue!.id;
 
-    await tx.insert(seats).values(
-      data.venue.rows.flatMap((r) =>
-        Array.from({ length: r.seats }, (_, i) => ({
-          venueId,
-          section: r.section,
-          rowLabel: r.row,
-          seatNumber: i + 1,
-          grade: r.grade,
-        })),
-      ),
-    );
+  await tx.insert(seats).values(
+    data.venue.rows.flatMap((r) =>
+      Array.from({ length: r.seats }, (_, i) => ({
+        venueId,
+        section: r.section,
+        rowLabel: r.row,
+        seatNumber: i + 1,
+        grade: r.grade,
+      })),
+    ),
+  );
 
-    const performanceIds: number[] = [];
-    for (const show of data.shows) {
-      const [s] = await tx.insert(shows).values({ title: show.title }).returning({ id: shows.id });
-      for (const p of show.performances) {
-        const [perf] = await tx
-          .insert(performances)
-          .values({ showId: s!.id, venueId, startsAt: new Date(p.startsAt), salesOpenAt: new Date(p.salesOpenAt) })
-          .returning({ id: performances.id });
-        const performanceId = perf!.id;
-        performanceIds.push(performanceId);
+  const performanceIds: number[] = [];
+  for (const show of data.shows) {
+    const [s] = await tx.insert(shows).values({ title: show.title }).returning({ id: shows.id });
+    for (const p of show.performances) {
+      const [perf] = await tx
+        .insert(performances)
+        .values({ showId: s!.id, venueId, startsAt: new Date(p.startsAt), salesOpenAt: new Date(p.salesOpenAt) })
+        .returning({ id: performances.id });
+      const performanceId = perf!.id;
+      performanceIds.push(performanceId);
 
-        await tx
-          .insert(performanceGrades)
-          .values(Object.entries(p.prices).map(([grade, price]) => ({ performanceId, grade, price })));
-        await tx.execute(sql`
-          insert into performance_seats (performance_id, seat_id)
-          select ${performanceId}, id from seats where venue_id = ${venueId}
-        `);
-      }
+      await tx
+        .insert(performanceGrades)
+        .values(Object.entries(p.prices).map(([grade, price]) => ({ performanceId, grade, price })));
+      await tx.execute(sql`
+        insert into performance_seats (performance_id, seat_id)
+        select ${performanceId}, id from seats where venue_id = ${venueId}
+      `);
     }
-    return { venueId, performanceIds };
-  });
+  }
+  return { venueId, performanceIds };
 }

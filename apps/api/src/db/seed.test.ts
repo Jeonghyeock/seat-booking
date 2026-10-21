@@ -44,13 +44,26 @@ describe("샘플 시드", () => {
     });
   });
 
-  it("가격이 빠진 등급이 있으면 아무것도 넣지 않고 실패한다", async () => {
-    const before = await pool.query<{ n: number }>("select count(*) as n from venues");
+  // 다른 테스트 파일이 같은 DB에 공연장을 넣으므로, 이 테스트만 쓰는 이름으로 센다
+  const venuesNamed = async (name: string) =>
+    (await pool.query<{ n: number }>("select count(*) as n from venues where name = $1", [name])).rows[0]!.n;
+
+  it("가격이 빠진 등급이 있으면 넣기 전에 실패한다", async () => {
     const broken = structuredClone(data);
+    broken.venue.name = "가격 누락 홀";
     delete broken.shows[0]!.performances[0]!.prices.S;
     await expect(seed(db, broken)).rejects.toThrow(/가격이 없는 등급: S/);
-    const after = await pool.query<{ n: number }>("select count(*) as n from venues");
-    expect(after.rows[0]!.n).toBe(before.rows[0]!.n);
+    expect(await venuesNamed("가격 누락 홀")).toBe(0);
+  });
+
+  it("넣는 도중에 실패하면 앞서 넣은 공연장·좌석까지 되돌린다", async () => {
+    // 공연장과 좌석을 넣은 뒤, 회차를 넣을 때 check 제약(판매 시작 < 공연 시작)에 걸린다
+    const broken = structuredClone(data);
+    broken.venue.name = "롤백 홀";
+    const p = broken.shows[0]!.performances[0]!;
+    p.salesOpenAt = p.startsAt;
+    await expect(seed(db, broken)).rejects.toMatchObject({ cause: { code: "23514" } });
+    expect(await venuesNamed("롤백 홀")).toBe(0);
   });
 });
 

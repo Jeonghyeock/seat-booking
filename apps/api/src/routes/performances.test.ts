@@ -40,9 +40,21 @@ describe("공연 목록과 좌석 지도 API", () => {
     expect(new Set(body.seats.map((s) => s.status))).toEqual(new Set(["available"]));
   });
 
-  it("없는 회차는 404, 숫자가 아닌 id는 400", async () => {
+  it("없는 회차는 404, 10진수 양의 정수가 아닌 id는 400", async () => {
     expect((await app.inject({ method: "GET", url: "/performances/999999999/seats" })).statusCode).toBe(404);
-    expect((await app.inject({ method: "GET", url: "/performances/abc/seats" })).statusCode).toBe(400);
-    expect((await app.inject({ method: "GET", url: "/performances/0/seats" })).statusCode).toBe(400);
+    for (const id of ["abc", "0", "-1", "1.5", "1e3", "0x10", "007", "1.0", "%20%2012", "9007199254740993"]) {
+      const res = await app.inject({ method: "GET", url: `/performances/${id}/seats` });
+      expect(res.statusCode, id).toBe(400);
+    }
+  });
+
+  it("회차에 어떤 등급의 가격이 없으면 그 좌석은 빠지지 않고 price null로 나온다", async () => {
+    const [, second] = performanceIds;
+    await pool.query("delete from performance_grades where performance_id = $1 and grade = 'S'", [second]);
+    const body = SeatMap.parse((await app.inject({ method: "GET", url: `/performances/${second}/seats` })).json());
+    expect(body.seats).toHaveLength(data.venue.rows.reduce((n, r) => n + r.seats, 0));
+    const sSeats = body.seats.filter((s) => s.grade === "S");
+    expect(sSeats.length).toBeGreaterThan(0);
+    expect(new Set(sSeats.map((s) => s.price))).toEqual(new Set([null]));
   });
 });
