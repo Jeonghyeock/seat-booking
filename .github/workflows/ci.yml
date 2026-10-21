@@ -8,6 +8,20 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      # 로컬과 같은 주 버전(DESIGN 6.4)
+      postgres:
+        image: postgres:18
+        env:
+          # 이 job이 끝나면 버려지는 DB라 비밀번호 없이 띄운다(저장소에 비밀번호 글자를 두지 않으려고).
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -16,4 +30,15 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      # 로컬과 같게 슈퍼유저가 아닌 앱 role로 마이그레이션과 테스트를 돌린다.
+      # 비밀번호는 실행마다 새로 만들어, 저장소에 비밀번호 글자가 남지 않게 한다.
+      - name: 앱 role과 DB 만들기(README의 로컬 준비와 같음)
+        run: |
+          APP_PASSWORD="$(openssl rand -hex 16)"
+          echo "::add-mask::$APP_PASSWORD"
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE seat_booking LOGIN CREATEDB PASSWORD '$APP_PASSWORD'" \
+            -c "CREATE DATABASE seat_booking OWNER seat_booking"
+          echo "DATABASE_URL=postgres://seat_booking:$APP_PASSWORD@localhost:5432/seat_booking" >> "$GITHUB_ENV"
+      - run: npm run db:migrate -w @seat-booking/api
       - run: npm test

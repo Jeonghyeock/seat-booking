@@ -9,6 +9,8 @@ declare module "vitest" {
 }
 
 const TEMPLATE = "seat_booking_test_template";
+// 같은 서버에서 테스트 실행 여럿이 템플릿을 동시에 지우고 만들지 않게 잡는 advisory lock 번호.
+const SETUP_LOCK = 7_340_101;
 
 // 실행마다 템플릿 DB를 새로 마이그레이션하고, 그것을 복제한 DB에서 테스트한다.
 // 복제는 마이그레이션을 다시 돌리는 것보다 빨라서, 2단계부터 테스트 파일마다 DB를 따로 줄 때 쓴다.
@@ -23,10 +25,18 @@ export default async function setup(project: TestProject) {
 
   const testDb = `seat_booking_test_${process.pid}`;
   await admin(baseUrl, async (client) => {
-    await client.query(`DROP DATABASE IF EXISTS ${TEMPLATE} WITH (FORCE)`);
-    await client.query(`CREATE DATABASE ${TEMPLATE}`);
-    await runMigrations(withDatabase(baseUrl, TEMPLATE));
-    await client.query(`CREATE DATABASE ${testDb} TEMPLATE ${TEMPLATE}`);
+    // 잠근 동안 템플릿을 만들고 바로 복제하므로, 다른 실행이 끼어들어 템플릿을 지우거나 바꾸지 못한다.
+    await client.query("SELECT pg_advisory_lock($1)", [SETUP_LOCK]);
+    try {
+      await client.query(`DROP DATABASE IF EXISTS ${TEMPLATE} WITH (FORCE)`);
+      await client.query(`CREATE DATABASE ${TEMPLATE}`);
+      await runMigrations(withDatabase(baseUrl, TEMPLATE));
+      // 강제 종료된 실행이 같은 pid로 남긴 DB가 있으면 지우고 만든다.
+      await client.query(`DROP DATABASE IF EXISTS ${testDb} WITH (FORCE)`);
+      await client.query(`CREATE DATABASE ${testDb} TEMPLATE ${TEMPLATE}`);
+    } finally {
+      await client.query("SELECT pg_advisory_unlock($1)", [SETUP_LOCK]);
+    }
   });
   project.provide("databaseUrl", withDatabase(baseUrl, testDb));
 
