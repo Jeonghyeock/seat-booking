@@ -94,7 +94,7 @@
 |---|---|---|
 | ① 조회 후 수정 | `SELECT status` → 비어 있으면 `UPDATE` | **틀림.** 두 요청이 둘 다 "비어 있음"을 읽고 둘 다 판다. 일부러 실패하는 테스트로 남겨 이 문제를 증명한다 |
 | ② `SELECT … FOR UPDATE` | 행을 잠그고 읽은 뒤 수정 | 맞다. 다만 왕복이 두 번이고 잠금을 쥐는 시간이 길다 |
-| ③ 조건부 `UPDATE` | `UPDATE performance_seats SET status='held', … WHERE id=$1 AND (status='available' OR (status='held' AND hold_expires_at < now())) RETURNING id` | **채택.** 한 문장 안에서 확인과 수정을 함께 한다. 두 요청이 겹치면 뒤 요청은 앞 요청이 끝날 때까지 기다린 뒤 바뀐 행으로 조건을 다시 보고, 0행을 받는다(READ COMMITTED에서 PostgreSQL의 동작) |
+| ③ 조건부 `UPDATE` | `UPDATE performance_seats SET status='held', … WHERE performance_id=$1 AND seat_id=$2 AND (status='available' OR (status='held' AND hold_expires_at < now())) RETURNING seat_id` | **채택.** 한 문장 안에서 확인과 수정을 함께 한다. 두 요청이 겹치면 뒤 요청은 앞 요청이 끝날 때까지 기다린 뒤 바뀐 행으로 조건을 다시 보고, 0행을 받는다(READ COMMITTED에서 PostgreSQL의 동작) |
 | ④ DB 불변식 | `tickets`의 부분 unique 인덱스 | ③과 **함께** 둔다. 앱 코드에 버그가 있어도 DB가 중복 판매를 거부한다 |
 
 - 만료를 부분 인덱스 조건에 넣을 수 없는 이유: 인덱스 조건의 함수는 IMMUTABLE이어야 하는데 `now()`는 그렇지 않다. 그래서 만료는 ③의 `WHERE`에서 판단하고, 정리 작업이 만료된 선점을 주기적으로 풀어 좌석 지도의 숫자를 맞춘다. 정리 작업은 `FOR UPDATE SKIP LOCKED`로 몇 행씩 처리한다.
@@ -193,5 +193,5 @@ seat-booking/
 1단계에서 더한 것(2026-10-21):
 
 11. 데이터 모델에 `shows`(공연 작품)와 `performance_grades`(회차별 등급 가격)를 더한다. 제목과 가격을 회차·좌석마다 되풀이하지 않기 위해서다. `performance_seats`에는 판매 상태만 둔다.
-12. PostgreSQL의 bigint(int8)는 node-postgres가 기본으로 문자열로 돌려준다. id뿐 아니라 `count(*)`도 int8이다. 연결 풀을 만드는 한 곳에서 int8을 number로 바꾸고, `Number.MAX_SAFE_INTEGER`를 넘으면 오류를 낸다. Drizzle 스키마의 `mode: "number"`와 직접 쓴 SQL의 결과가 같은 타입이 된다.
+12. PostgreSQL의 bigint(int8)는 node-postgres가 기본으로 문자열로 돌려준다. id뿐 아니라 `count(*)`도 int8이다. 연결 풀을 만드는 한 곳에서 int8을 number로 바꾸고, `Number.MAX_SAFE_INTEGER`를 넘으면 오류를 낸다. Drizzle 스키마의 `mode: "number"`와 직접 쓴 SQL의 int8 결과가 같은 타입이 된다. 예외: int8 배열(`bigint[]`)과 numeric(`sum(bigint)`, `avg`)은 여전히 문자열이고, `pg_stat_statements.queryid`처럼 int8 범위 전체를 쓰는 값은 이 변환에서 오류가 난다. 그런 열은 SQL에서 `::text`로 바꿔 읽는다.
 13. 요청·응답 스키마는 `packages/shared`의 zod로 정의하고, Fastify에는 fastify-type-provider-zod로 붙인다. 이 패키지는 `@fastify/swagger`를 필수 peer로 끌어온다(지금은 OpenAPI 문서를 만들지 않는다).

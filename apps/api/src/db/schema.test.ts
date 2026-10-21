@@ -14,7 +14,7 @@ describe("첫 마이그레이션", () => {
   });
 
   it("같은 공연장의 같은 자리를 두 번 넣으면 unique 위반(23505)", async () => {
-    const venue = await pool.query<{ id: string }>(
+    const venue = await pool.query<{ id: number }>(
       "insert into venues (name) values ('테스트 홀') returning id",
     );
     const insertSeat = () =>

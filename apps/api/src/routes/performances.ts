@@ -19,7 +19,8 @@ function performanceSummaries(db: Db) {
 }
 
 // 좌석 지도. performance_seats의 기본 키 (performance_id, seat_id)를 앞쪽 열로 써서 이 회차의 재고만 읽는다.
-// 가격은 좌석의 등급으로 회차별 등급 가격을 찾아 붙인다. 순서는 좌석 id(시드의 배치 순서)라 정렬 규칙(collation)에 기대지 않는다.
+// 가격은 좌석의 등급으로 회차별 등급 가격을 찾아 붙인다. 가격 행이 없어도 좌석이 빠지지 않게 LEFT JOIN이다(price null).
+// 순서는 좌석 id(시드의 배치 순서)라 정렬 규칙(collation)에 기대지 않는다.
 export function seatMapQuery(db: Db, performanceId: number) {
   return db
     .select({
@@ -33,7 +34,7 @@ export function seatMapQuery(db: Db, performanceId: number) {
     })
     .from(performanceSeats)
     .innerJoin(seats, eq(seats.id, performanceSeats.seatId))
-    .innerJoin(
+    .leftJoin(
       performanceGrades,
       and(eq(performanceGrades.performanceId, performanceSeats.performanceId), eq(performanceGrades.grade, seats.grade)),
     )
