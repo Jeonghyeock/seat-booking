@@ -5,7 +5,7 @@ import { newPerformance, newUsers } from "../test/fixtures.js";
 import { buildApp } from "./app.js";
 import { createDb, type Db } from "./db/client.js";
 import { createPool } from "./db/pool.js";
-import { type HoldInput, type HoldResult, holdSeats, holdWithinTx, settle } from "./holds.js";
+import { type HoldInput, type HoldResult, holdSeats, holdWithinTx, toHoldResult } from "./holds.js";
 
 describe("1인 좌석 한도(C6)", () => {
   const pool = createPool({ connectionString: inject("databaseUrl") });
@@ -76,8 +76,10 @@ describe("1인 좌석 한도(C6)", () => {
 
 // DESIGN 6.1의 세 후보와 잠금 없는 방식을 같은 장면에 넣어 비교한다.
 // 장면: 사용자가 이미 2석을 쥐고 있고, 두 창에서 2석씩 더 담는다. 한도(4석)를 지키면 한 창만 성공해야 한다.
-// 세 번째 연결이 사용자 행을 FOR UPDATE로 쥐고 있으면, 선점 행을 넣을 때의 외래 키 확인(FOR KEY SHARE)이 막힌다.
-// 잠금 없는 방식은 두 창이 모두 좌석 수를 센 뒤 거기서 기다리고, 잠그는 방식은 두 번째 창이 좌석 수를 세기 전에 기다린다.
+// 세 번째 연결이 사용자 행을 FOR UPDATE로 쥐고 있으면 그 행에 거는 다른 잠금이 막힌다. 그래서 창마다 기다리는 곳이 다르다.
+// - 잠금 없음, SERIALIZABLE: 두 창 모두 좌석 수를 센 뒤, 선점 행을 넣을 때의 외래 키 확인(FOR KEY SHARE)에서 기다린다.
+// - advisory lock: 첫 창은 잠근 뒤 세고 외래 키 확인에서, 두 번째 창은 세기 전에 advisory lock에서 기다린다.
+// - 사용자 행 잠금: 두 창 모두 세기 전에 사용자 행(FOR NO KEY UPDATE)에서 기다린다.
 describe("1인 한도를 지키는 방법 비교", () => {
   const url = inject("databaseUrl");
   const admin = createPool({ connectionString: url });
@@ -90,10 +92,10 @@ describe("1인 한도를 지키는 방법 비교", () => {
 
   let serializableRetries = 0;
   const strategies: Record<string, (db: Db, input: HoldInput) => Promise<HoldResult>> = {
-    "잠금 없음(일부러 틀린 방식)": (db, input) => settle(() => db.transaction((tx) => holdWithinTx(tx, input))),
+    "잠금 없음(일부러 틀린 방식)": (db, input) => toHoldResult(() => db.transaction((tx) => holdWithinTx(tx, input))),
     "사용자·회차 advisory lock(채택)": holdSeats,
     "사용자 행 FOR NO KEY UPDATE": (db, input) =>
-      settle(() =>
+      toHoldResult(() =>
         db.transaction(async (tx) => {
           // FOR UPDATE로 잠그면 다른 표의 외래 키 확인(FOR KEY SHARE)까지 막는다. 키를 바꾸지 않으므로 NO KEY UPDATE로 충분하다.
           await tx.execute(sql`select 1 from users where id = ${input.userId} for no key update`);
@@ -103,7 +105,7 @@ describe("1인 한도를 지키는 방법 비교", () => {
     "SERIALIZABLE과 재시도": async (db, input) => {
       for (let attempt = 1; ; attempt++) {
         try {
-          return await settle(() => db.transaction((tx) => holdWithinTx(tx, input), { isolationLevel: "serializable" }));
+          return await toHoldResult(() => db.transaction((tx) => holdWithinTx(tx, input), { isolationLevel: "serializable" }));
         } catch (err) {
           if (sqlState(err) !== "40001" || attempt === 5) throw err;
           serializableRetries++;
@@ -116,7 +118,8 @@ describe("1인 한도를 지키는 방법 비교", () => {
     for (let i = 0; i < 300; i++) {
       const { rows } = await admin.query(
         `select count(*) as n from pg_stat_activity
-          where datname = current_database() and application_name = 'hold-limit-compare' and wait_event_type = 'Lock'`,
+          where datname = current_database() and application_name = 'hold-limit-compare'
+            and wait_event_type = 'Lock' and wait_event in ('advisory', 'transactionid', 'tuple')`,
       );
       if (rows[0].n === count) return;
       await new Promise((r) => setTimeout(r, 10));

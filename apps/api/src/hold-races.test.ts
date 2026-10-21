@@ -186,7 +186,8 @@ describe("holdSeats는 실행 계획이 달라도 좌석 id 순서로 잠근다"
     for (let i = 0; i < 300; i++) {
       const { rows } = await admin.query(
         `select count(*) as n from pg_stat_activity
-          where datname = current_database() and application_name like 'hold-order-%' and wait_event_type = 'Lock'`,
+          where datname = current_database() and application_name like 'hold-order-%'
+            and wait_event_type = 'Lock' and wait_event in ('transactionid', 'tuple')`,
       );
       if (rows[0].n === count) return;
       await new Promise((r) => setTimeout(r, 10));

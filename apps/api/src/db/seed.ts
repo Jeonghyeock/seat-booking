@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
-import type { Db } from "./client.js";
+import type { Db, Tx } from "./client.js";
 import { performanceGrades, performances, seats, shows, venues } from "./schema.js";
 
 // 시드 JSON의 모양. 좌석 배치는 줄마다 "몇 석, 어느 등급"으로 적는다.
@@ -39,8 +39,6 @@ export function readSeedFile(path: URL): SeedData {
 }
 
 export const SAMPLE_SEED = new URL("../../seed/sample.json", import.meta.url);
-
-export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 // 공연장·좌석·작품·회차·등급 가격을 넣고, 회차마다 그 공연장의 좌석으로 재고를 만든다. 전부 한 트랜잭션이다.
 export function seed(db: Db, data: SeedData) {
