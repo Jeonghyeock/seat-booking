@@ -7,3 +7,4 @@ export function createDb(pool: pg.Pool) {
 }
 
 export type Db = ReturnType<typeof createDb>;
+export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
