@@ -73,8 +73,10 @@
 | `users` | email(unique), password_hash, role | role: customer / admin |
 | `sessions` | id(무작위 32바이트), user_id, expires_at | 4단계 |
 | `venues`, `seats` | 구역·열·번호, 등급 | 시드 JSON |
-| `performances` | venue_id, starts_at, sales_open_at | 회차 |
-| `performance_seats` | performance_id, seat_id, price, status, hold_id, hold_expires_at | 좌석 재고. status: available / held / sold |
+| `shows` | title | 공연 작품. 1단계에서 더함(회차에 제목을 두면 회차마다 되풀이된다) |
+| `performances` | show_id, venue_id, starts_at, sales_open_at | 회차 |
+| `performance_grades` | (performance_id, grade) PK, price | 회차별 등급 가격. 1단계에서 더함(가격은 좌석이 아니라 등급마다 정해진다) |
+| `performance_seats` | (performance_id, seat_id) PK, status | 좌석 재고. status: available / held / sold. 선점용 hold_id·hold_expires_at은 2단계 마이그레이션에서 더한다 |
 | `holds` | user_id, performance_id, expires_at | 선점 묶음 |
 | `orders` | user_id, hold_id, status, amount | pending / paid / cancelled / refunded |
 | `payments` | order_id, provider_ref(unique), status | 웹훅 중복을 provider_ref로 거름 |
@@ -114,6 +116,7 @@
   3. 아직 처리 중이면 409를 돌려준다.
   4. 같은 키에 다른 본문이 오면(request_hash 불일치) 422를 돌려준다.
 - 웹훅 중복은 `payments.provider_ref`의 unique 제약으로 거른다.
+- 주문은 만들 때의 가격을 복사해 둔다(`orders.amount`). 나중에 `performance_grades`의 가격이 바뀌어도 이미 낸 금액은 그대로다.
 
 ### 6.3 인증 (4단계)
 
@@ -186,3 +189,9 @@ seat-booking/
 8. pnpm 대신 npm workspaces를 쓴다. 따로 설치할 것이 없고(corepack 활성화는 관리자 권한이 필요), 이 규모에서는 차이가 없다.
 9. TypeScript는 6.0.x로 고정한다. 7(네이티브 컴파일러)이 최신이지만, 쓰는 도구들과의 호환을 확인한 뒤 올린다. 타입 검사(`tsc --noEmit`)에만 쓰고, 실행은 tsx, 테스트는 Vitest가 한다.
 10. 앱은 슈퍼유저가 아니라 DB 소유 role로 접속한다. 7단계에서 권한을 더 나눌 때 바꿀 것이 적어진다.
+
+1단계에서 더한 것(2026-10-21):
+
+11. 데이터 모델에 `shows`(공연 작품)와 `performance_grades`(회차별 등급 가격)를 더한다. 제목과 가격을 회차·좌석마다 되풀이하지 않기 위해서다. `performance_seats`에는 판매 상태만 둔다.
+12. PostgreSQL의 bigint(int8)는 node-postgres가 기본으로 문자열로 돌려준다. id뿐 아니라 `count(*)`도 int8이다. 연결 풀을 만드는 한 곳에서 int8을 number로 바꾸고, `Number.MAX_SAFE_INTEGER`를 넘으면 오류를 낸다. Drizzle 스키마의 `mode: "number"`와 직접 쓴 SQL의 결과가 같은 타입이 된다.
+13. 요청·응답 스키마는 `packages/shared`의 zod로 정의하고, Fastify에는 fastify-type-provider-zod로 붙인다. 이 패키지는 `@fastify/swagger`를 필수 peer로 끌어온다(지금은 OpenAPI 문서를 만들지 않는다).

@@ -34,4 +34,23 @@
 - `npm audit`의 moderate 4건은 개발용 drizzle-kit 안의 옛 esbuild에서 나온다. 운영 의존성은 0건이다.
 
 1단계에서 정할 것:
-- id(bigint)가 Drizzle에서는 number, `pool.query`로 직접 쓴 SQL에서는 string으로 온다. 첫 조회를 쓸 때 `pg.types.setTypeParser(20, …)`로 맞추거나, 직접 쓴 SQL은 string으로 다룬다는 규칙을 정한다.
+- id(bigint)가 Drizzle에서는 number, `pool.query`로 직접 쓴 SQL에서는 string으로 온다. 첫 조회를 쓸 때 `pg.types.setTypeParser(20, …)`로 맞추거나, 직접 쓴 SQL은 string으로 다룬다는 규칙을 정한다. → 1단계에서 정함(DESIGN 10장 12).
+
+### 0단계 — 설명할 수 있어야 할 것
+
+**마이그레이션은 어떻게 적용되고, 어떻게 되돌리나**
+
+1. `npm run db:generate`(drizzle-kit generate)는 `src/db/schema.ts`를 직전 스냅샷(`drizzle/meta/*_snapshot.json`)과 비교해 바뀐 부분만 SQL 파일(`drizzle/0000_init.sql`)로 쓴다. `drizzle/meta/_journal.json`에는 파일마다 만든 시각(`when`)이 남는다.
+2. `npm run db:migrate`(`src/db/migrate.ts`)는 DB의 `drizzle.__drizzle_migrations` 표에서 마지막으로 적용한 마이그레이션의 시각을 읽는다. 그보다 나중에 만든 파일만 차례로 실행하고, 실행한 파일마다 SQL의 해시와 시각을 그 표에 적는다.
+3. 아직 적용하지 않은 파일은 **트랜잭션 하나 안에서** 모두 실행한다. PostgreSQL은 `CREATE TABLE` 같은 DDL도 트랜잭션으로 되돌릴 수 있으므로, 중간에 하나가 실패하면 그 실행의 변경은 전부 취소된다. 예외는 트랜잭션 안에서 실행할 수 없는 문장(`CREATE INDEX CONCURRENTLY` 등)이다. 7단계에서 다룬다.
+4. 주의할 점이 두 가지 있다.
+   - 이미 적용한 파일을 고쳐도 다시 실행되지 않는다. 해시를 적어 두기만 하고 비교하지는 않는다.
+   - 다른 브랜치에서 더 이른 시각에 만든 파일이 늦게 합쳐지면, 마지막 시각보다 앞서므로 건너뛴다. 그래서 마이그레이션은 main에 들어간 순서대로 만들어야 한다.
+5. Drizzle에는 되돌리는(down) 마이그레이션이 없다. 운영에서 되돌리려면 반대 동작을 하는 마이그레이션을 새로 만들어 앞으로 적용한다. 개발 DB는 지우고 처음부터 다시 적용하면 된다. 테스트 DB는 실행마다 새로 만든다.
+
+**연결 풀은 왜 쓰나**
+
+1. PostgreSQL은 연결 하나마다 서버 프로세스를 하나 띄운다. 연결을 맺을 때마다 TCP 연결, 인증(SCRAM), 프로세스 생성이 일어나므로 요청마다 새로 연결하면 느리고, 서버 메모리도 연결 수만큼 쓴다.
+2. `pg.Pool`은 연결을 미리 맺어 두고 돌려 쓴다. 기본값은 최대 10개, 10초 동안 쓰지 않은 연결은 닫는다. 연결이 모두 쓰이고 있으면 다음 요청은 빌 때까지 기다린다. 그래서 DB가 받는 연결 수(기본 `max_connections` 100)를 앱 쪽에서 넘지 않게 막는 역할도 한다.
+3. 이 저장소에서는 `main.ts`가 풀 하나를 만들어 앱 전체가 쓰고, 서버를 닫을 때 풀도 닫는다. `pool.query()`는 쿼리 하나마다 연결을 빌렸다가 바로 돌려준다.
+4. 2단계부터 중요해지는 점: 트랜잭션은 같은 연결에서 `BEGIN`부터 `COMMIT`까지 이어져야 한다. `pool.query()`를 여러 번 부르면 서로 다른 연결로 갈 수 있으므로, 트랜잭션은 `pool.connect()`로 연결 하나를 빌려 그 안에서 처리하고 끝나면 돌려준다.
