@@ -4,6 +4,8 @@
 
 > 진행 중(0단계). 설계: [docs/DESIGN.md](docs/DESIGN.md) · 진행 기록: [docs/PROGRESS.md](docs/PROGRESS.md)
 
+> Claude Code와 함께 만든다.
+
 ## 스택
 
 TypeScript · Fastify · Drizzle ORM · PostgreSQL 18 · zod · Vitest · React + Vite(5단계) · k6(6단계)
