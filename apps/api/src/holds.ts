@@ -156,9 +156,12 @@ export function holdSeats(db: Db, input: HoldInput): Promise<HoldResult> {
   );
 }
 
-// 이 회차에서 내 유효한 선점과 한도(GET /performances/:id/me). 부르는 쪽이 한 스냅샷(읽기 전용 트랜잭션)에서 부른다.
+// 이 회차에서 내 유효한 선점과 한도(GET /performances/:id/me). 부르는 쪽이 한 스냅샷(repeatable read 트랜잭션)에서 부르고,
+// 회차가 있는지도 먼저 확인한다.
 // 유효한 선점은 "좌석이 이 선점으로 아직 held이고 만료 전"이다. 주문을 취소해도 holds.expires_at은 미래로 남으므로
 // 선점 행이 아니라 좌석으로 거른다(DESIGN 6.2 "화면이 받는 것").
+// 붙은 주문은 늘 pending이라 상태로 거르지 않는다. 주문을 paid·cancelled로 바꾸는 경로는 같은 트랜잭션에서 좌석을
+// sold·available로 바꾸므로, 좌석이 이 선점으로 held이고 만료 전이면 주문은 아직 pending이다.
 export async function myPerformance(tx: Tx, userId: number, performanceId: number): Promise<MyPerformance> {
   const counted = await countLimitSeats(tx, userId, performanceId);
   const rows = await tx
@@ -195,11 +198,9 @@ export async function myPerformance(tx: Tx, userId: number, performanceId: numbe
   return {
     performanceId,
     serverTime: now!.serverTime.toISOString(),
-    limit: {
-      limit: SEAT_LIMIT_PER_USER,
-      ...counted,
-      remaining: Math.max(0, SEAT_LIMIT_PER_USER - counted.heldSeats - counted.purchasedSeats),
-    },
+    limit: SEAT_LIMIT_PER_USER,
+    ...counted,
+    remaining: Math.max(0, SEAT_LIMIT_PER_USER - counted.heldSeats - counted.purchasedSeats),
     holds: [...byHold.values()],
   };
 }
