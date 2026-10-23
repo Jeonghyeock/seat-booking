@@ -135,6 +135,10 @@ export const HoldConflict = z.discriminatedUnion("code", [
 ]);
 export type HoldConflict = z.infer<typeof HoldConflict>;
 
+// 가짜 결제의 상황(DESIGN 10장 20). 결제 요청 본문에서 고른다. 각 상황의 뜻은 apps/api/src/fake-pay.ts에 적었다.
+export const PaymentScenario = z.enum(["success", "fail", "duplicate", "out_of_order", "early", "lost"]);
+export type PaymentScenario = z.infer<typeof PaymentScenario>;
+
 export const OrderStatus = z.enum(["pending", "paid", "cancelled"]);
 export type OrderStatus = z.infer<typeof OrderStatus>;
 export const PaymentStatus = z.enum(["requested", "succeeded", "failed", "refund_pending", "refunded", "refund_failed"]);
