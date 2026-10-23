@@ -98,7 +98,14 @@ export function expectUnauthenticated(
 ) {
   expect(res.statusCode, name).toBe(401);
   expect(AuthError.parse(res.json()).code, name).toBe("UNAUTHENTICATED");
+  const setCookie = res.headers["set-cookie"];
   if (name === "모양이 틀린 쿠키" || name === "만료된 세션") {
-    expect(String(res.headers["set-cookie"]), name).toMatch(new RegExp(`^${sessionCookieName(true)}=;`));
+    // 지우는 Set-Cookie도 구울 때와 같은 속성이어야 브라우저가 __Host- 쿠키를 지운다
+    const parts = String(setCookie).split("; ");
+    expect(parts[0], name).toBe(`${sessionCookieName(true)}=`);
+    expect(parts, name).toEqual(expect.arrayContaining(["Max-Age=0", "Path=/", "HttpOnly", "Secure", "SameSite=Lax"]));
+    expect(String(setCookie), name).not.toMatch(/Domain=/i);
+  } else {
+    expect(setCookie, name).toBeUndefined();
   }
 }

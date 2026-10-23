@@ -18,7 +18,7 @@ describe("POST /orders/:id/cancel", () => {
     await Promise.all([pool.end(), admin.end()]);
   });
 
-  const asUser = (userId: number) => (authHeaders(userId));
+  const asUser = authHeaders;
   const hold = async (performanceId: number, userId: number, seatIds: number[]) => {
     const res = await app.inject({
       method: "POST",
