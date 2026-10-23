@@ -8,7 +8,8 @@ export const TAKEOVER_AFTER_SECONDS = 60;
 
 export type IdempotencyScope = { userId: number; route: string; key: string; requestHash: string };
 // body는 JSON 객체다. null이면 응답 열의 CHECK(code와 본문이 함께 있다)가 깨진다.
-export type StoredResponse = { statusCode: number; body: object };
+// headers는 저장하지 않는다. 저장하지 않는 응답(keep: release, 예: 503의 Retry-After)에만 쓴다.
+export type StoredResponse = { statusCode: number; body: object; headers?: Record<string, string> };
 // 업무가 끝난 뒤 키를 어떻게 남길지.
 // saved: 업무 트랜잭션 안에서 이미 저장했다. save: 다시 보내도 같은 4xx라 저장한다. release: 키를 지워 다시 보낼 수 있게 한다.
 export type WorkResult = { response: StoredResponse; keep: "saved" | "save" | "release" };
