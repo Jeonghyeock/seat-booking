@@ -59,8 +59,8 @@
   border-bottom: 1px solid var(--color-border);
 }
 
-.items td:last-child,
-.items tfoot td {
+.items th:last-child,
+.items td:last-child {
   text-align: right;
 }
 

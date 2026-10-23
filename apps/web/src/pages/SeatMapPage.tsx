@@ -296,7 +296,13 @@ export function SeatMapPage({ performanceId }: { performanceId: number }) {
             onClick={onHold}
             disabled={!open || selected.length === 0 || tooMany || hold.isPending}
           >
-            {hold.isPending ? "선점하는 중…" : me === null ? "로그인하고 선점하기" : `${selected.length}석 선점하기`}
+            {hold.isPending
+              ? "선점하는 중…"
+              : me === null
+                ? "로그인하고 선점하기"
+                : selected.length === 0
+                  ? "선점하기"
+                  : `${selected.length}석 선점하기`}
           </button>
           <p className={styles.muted}>선점하면 5분 동안 좌석이 잡히고, 그 안에 결제해야 합니다.</p>
         </aside>
