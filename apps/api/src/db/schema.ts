@@ -62,11 +62,13 @@ export const performances = pgTable(
     salesCloseAt: timestamp("sales_close_at", { withTimezone: true }).notNull(),
   },
   // 판매 기간이 비어 있지 않고, 판매는 공연 시작 전에 닫힌다(같아도 된다).
+  // 같은 공연장·같은 공연 시작의 회차는 하나다. 관리자가 등록을 두 번 눌러도 회차가 둘 생기지 않는다(DESIGN 6.3 관리자 기능).
   (t) => [
     check(
       "performances_sales_window_valid",
       sql`${t.salesOpenAt} < ${t.salesCloseAt} and ${t.salesCloseAt} <= ${t.startsAt}`,
     ),
+    unique("performances_venue_starts_unique").on(t.venueId, t.startsAt),
   ],
 );
 
