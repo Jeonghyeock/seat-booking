@@ -12,7 +12,8 @@ CREATE TABLE "idempotency_keys" (
 	CONSTRAINT "idempotency_keys_user_id_route_key_pk" PRIMARY KEY("user_id","route","key"),
 	CONSTRAINT "idempotency_keys_status_valid" CHECK ("idempotency_keys"."status" in ('processing', 'done')),
 	CONSTRAINT "idempotency_keys_key_length" CHECK (char_length("idempotency_keys"."key") between 1 and 255),
-	CONSTRAINT "idempotency_keys_response_matches_status" CHECK (("idempotency_keys"."status" = 'done') = ("idempotency_keys"."response_code" is not null and "idempotency_keys"."response_body" is not null))
+	CONSTRAINT "idempotency_keys_response_matches_status" CHECK (("idempotency_keys"."status" = 'done') = ("idempotency_keys"."response_code" is not null)),
+	CONSTRAINT "idempotency_keys_response_fields_together" CHECK (("idempotency_keys"."response_code" is null) = ("idempotency_keys"."response_body" is null))
 );
 --> statement-breakpoint
 CREATE TABLE "order_items" (
@@ -43,10 +44,10 @@ CREATE TABLE "payment_webhooks" (
 	"event_id" text PRIMARY KEY NOT NULL,
 	"payment_id" bigint,
 	"type" text NOT NULL,
-	"result" text NOT NULL,
+	"result" text DEFAULT 'received' NOT NULL,
 	"body" jsonb NOT NULL,
 	"received_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "payment_webhooks_result_valid" CHECK ("payment_webhooks"."result" in ('processed', 'ignored', 'unmatched'))
+	CONSTRAINT "payment_webhooks_result_valid" CHECK ("payment_webhooks"."result" in ('received', 'processed', 'ignored', 'unmatched'))
 );
 --> statement-breakpoint
 CREATE TABLE "payments" (
@@ -83,6 +84,7 @@ ALTER TABLE "orders" ADD CONSTRAINT "orders_hold_id_holds_id_fk" FOREIGN KEY ("h
 ALTER TABLE "payments" ADD CONSTRAINT "payments_order_id_orders_id_fk" FOREIGN KEY ("order_id") REFERENCES "public"."orders"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tickets" ADD CONSTRAINT "tickets_order_id_orders_id_fk" FOREIGN KEY ("order_id") REFERENCES "public"."orders"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tickets" ADD CONSTRAINT "tickets_performance_seat_fk" FOREIGN KEY ("performance_id","seat_id") REFERENCES "public"."performance_seats"("performance_id","seat_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "tickets" ADD CONSTRAINT "tickets_order_item_fk" FOREIGN KEY ("order_id","seat_id") REFERENCES "public"."order_items"("order_id","seat_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "idempotency_keys_created_idx" ON "idempotency_keys" USING btree ("created_at");--> statement-breakpoint
 CREATE INDEX "orders_pending_hold_idx" ON "orders" USING btree ("hold_id") WHERE "orders"."status" = 'pending';--> statement-breakpoint
 CREATE UNIQUE INDEX "payments_provider_ref_unique" ON "payments" USING btree ("provider_ref") WHERE "payments"."provider_ref" is not null;--> statement-breakpoint
