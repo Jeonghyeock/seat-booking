@@ -79,7 +79,9 @@ jobs:
         run: |
           APP_PASSWORD="$(openssl rand -hex 16)"
           echo "::add-mask::$APP_PASSWORD"
-          psql -h localhost -U postgres -v ON_ERROR_STOP=1 \n            -c "CREATE ROLE seat_booking LOGIN CREATEDB PASSWORD '$APP_PASSWORD'" \n            -c "CREATE DATABASE seat_booking OWNER seat_booking"
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE seat_booking LOGIN CREATEDB PASSWORD '$APP_PASSWORD'" \
+            -c "CREATE DATABASE seat_booking OWNER seat_booking"
           echo "DATABASE_URL=postgres://seat_booking:$APP_PASSWORD@localhost:5432/seat_booking" >> "$GITHUB_ENV"
       # 브라우저는 캐시하지 않는다(복원이 내려받기와 비슷하게 걸리고, apt 의존성은 캐시할 수 없다).
       - run: npx playwright install --with-deps --only-shell chromium
