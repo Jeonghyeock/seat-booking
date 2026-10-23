@@ -278,8 +278,8 @@ SKIP LOCKED는 다른 트랜잭션이 잠근 행을 기다리지 않고 건너�
 
 1. 업무를 시작하기 전에 **별도 트랜잭션으로** `INSERT … ON CONFLICT DO NOTHING`(processing, 새 `owner_token`)을 하고 커밋한다. 커밋해 두어야 같은 키로 동시에 온 요청이 이 행을 본다(READ COMMITTED는 커밋된 행만 본다).
 2. 이미 있으면:
-   - request_hash가 다르면 422(같은 키를 다른 요청에 썼다).
-   - done이면 저장한 응답을 그대로 돌려준다(C4: 차례로 다시 보낸 요청).
+   - request_hash가 다르면 422 `IDEMPOTENCY_KEY_REUSED`(같은 키를 다른 요청에 썼다).
+   - done이면 저장한 응답을 그대로 돌려주고 `Idempotent-Replayed: true`를 붙인다(C4: 차례로 다시 보낸 요청). 본문의 serverTime·status도 처음 것이라, 화면은 이 헤더를 보면 조회로 최신 상태를 읽는다(10장 37).
    - processing이면 409 `REQUEST_IN_PROGRESS`와 `Retry-After`(C4: 동시에 보낸 두 번째 요청).
    - processing인데 `updated_at`이 1분 넘게 지났으면(처리 중에 서버가 죽음) 따로 커밋하는 트랜잭션에서 `owner_token`을 새것으로, `updated_at`을 지금으로 바꿔 넘겨받는다(`WHERE owner_token = 옛것`이라 둘이 동시에 넘겨받지 못하고, `updated_at`을 바꾸므로 세 번째 요청이 곧바로 다시 넘겨받지 못한다).
 3. 업무 트랜잭션의 끝에서 같은 트랜잭션으로 응답을 저장하고 done으로 바꾼다. `WHERE owner_token = 내 것 AND status = 'processing'`이 0행이면(누가 넘겨받았다) 예외를 던져 업무까지 되돌리고, 저장된 응답이 있으면 그것을 돌려준다.
@@ -308,7 +308,7 @@ SKIP LOCKED는 다른 트랜잭션이 잠근 행을 기다리지 않고 건너�
 
 **인덱스.** 정리 1 `performance_seats(hold_expires_at) WHERE status = 'held'`, 정리 2 `orders(hold_id) WHERE status = 'pending'`, 마지막 결제 찾기 `payments(order_id, created_at)`, 같은 키의 결제 찾기 `payments(order_id, idempotency_key)` unique, 대사 `payments(created_at) WHERE status = 'requested'`, 환불 `payments(created_at) WHERE status = 'refund_pending'`, 관리자 목록 `payments(updated_at) WHERE status = 'refund_failed'`, 내 선점 찾기는 기존 `holds_user_performance_idx`, 표 `tickets(order_id)`, 멱등 키 지우기 `idempotency_keys(created_at)`.
 
-**PR 순서.** 스키마(표와 제약·인덱스, 공유 zod 스키마) → 판매 기간·팔린 좌석 한도(2단계에서 미룬 것) → 주문 생성과 멱등 키 → 가짜 결제사·결제 요청·웹훅·결제 확정(C4) → 정리 작업(C3, 환불, 대사) → 취소(C5) → 기록.
+**PR 순서.** 스키마(표와 제약·인덱스, 공유 zod 스키마) → 판매 기간·팔린 좌석 한도(2단계에서 미룬 것) → 주문 생성과 멱등 키 → 내 선점 조회(`/me`) → 가짜 결제사·결제 요청·웹훅·결제 확정(C4) → 정리 작업(C3, 환불, 대사) → 취소(C5) → 기록.
 
 ### 6.3 인증 (4단계)
 
@@ -422,3 +422,7 @@ seat-booking/
 구현 리뷰에서 더한 것(2026-10-23):
 
 36. 판매 종료는 지금 공연 시작(`starts_at`)이다. 결제 마감이 선점 만료 30초 전이라, 공연 시작 30초 안에 잡은 선점은 결제할 수 없다. 판매 종료를 공연 시작보다 앞당기는 여유(`starts_at − n`)는 운영 규칙이 필요할 때 정한다. (AI 판단, 선점 PR 리뷰 L2)
+37. 멱등 키로 다시 보낸 요청에는 처음 응답을 그대로 주고 `Idempotent-Replayed: true`를 붙인다. C4("응답은 처음과 같다")를 지키려고 본문의 serverTime·status를 고치지 않는다. 화면은 이 헤더를 보면 `GET /orders/:id`로 최신 상태를 읽는다. (AI 판단, 주문 PR)
+38. 없는 사용자(401)와 없거나 남의 선점(404)은 멱등 키를 잡기 전에 거른다. 키 행이 사용자를 외래 키로 가리키고, 이 확인은 아무것도 바꾸지 않는다. 남의 선점·주문은 없는 것과 같이 404다. (AI 판단, 주문 PR)
+39. request_hash에는 검증을 마친 값을 넣는다. 주문 생성은 본문이 없어 선점 id만 넣는다. 본문 `{}`를 보냈는지에 따라 422가 나지 않게 한다. (AI 판단, 주문 PR)
+40. 쓰기 경로의 시간 제한(문장 5초, 잠금 대기 3초)은 `writeTransaction`이 `set_config(…, true)`로 건다. 걸리면(57014·55P03) 500이고 멱등 키를 지운다. 503과 `Retry-After`로 나누는 것은 6단계 측정 뒤에 본다. (AI 판단, 주문 PR)

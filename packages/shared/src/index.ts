@@ -30,10 +30,18 @@ const IdString = z
   .pipe(z.number().int().positive().max(Number.MAX_SAFE_INTEGER));
 
 export const PerformanceParams = z.object({ id: IdString });
+export const HoldParams = z.object({ id: IdString });
+export const OrderParams = z.object({ id: IdString });
 
 // 4단계 전까지 쓰는 임시 헤더다. 인증이 아니어서 누구나 다른 사람 행세를 할 수 있다(DESIGN 10장 15).
 // Fastify는 검증한 값을 원래 헤더 위에 덧씌우므로 다른 헤더가 지워지지는 않는다. looseObject는 다른 헤더도 타입에 남긴다.
 export const UserHeaders = z.looseObject({ "x-user-id": IdString });
+
+// 주문 생성·결제 요청은 Idempotency-Key가 있어야 한다(DESIGN 6.2 멱등성). 길이는 DB의 CHECK와 같다.
+export const IdempotentUserHeaders = z.looseObject({
+  "x-user-id": IdString,
+  "idempotency-key": z.string().min(1).max(255),
+});
 
 export const SeatStatus = z.enum(["available", "held", "sold"]);
 export type SeatStatus = z.infer<typeof SeatStatus>;
@@ -82,6 +90,8 @@ export type HoldResponse = z.infer<typeof HoldResponse>;
 // HOLD_LIMIT: 이 회차에 쥔 좌석·산 좌석과 합치면 1인 한도를 넘는다.
 // PRICE_MISSING: 담은 좌석 중 이 회차에 가격이 없는 좌석(seatIds)이 있다. 그 좌석을 빼고 다시 고른다.
 // SEAT_UNAVAILABLE: 담은 좌석 중 이미 선점·판매됐거나 이 회차의 좌석이 아닌 것(seatIds)이 있다.
+const PriceMissing = z.object({ error: z.string(), code: z.literal("PRICE_MISSING"), seatIds: SeatIds });
+
 export const HoldConflict = z.discriminatedUnion("code", [
   z.object({
     error: z.string(),
@@ -98,7 +108,68 @@ export const HoldConflict = z.discriminatedUnion("code", [
     heldSeats: z.number().int().nonnegative(),
     purchasedSeats: z.number().int().nonnegative(),
   }),
-  z.object({ error: z.string(), code: z.literal("PRICE_MISSING"), seatIds: SeatIds }),
+  PriceMissing,
   z.object({ error: z.string(), code: z.literal("SEAT_UNAVAILABLE"), seatIds: SeatIds }),
 ]);
 export type HoldConflict = z.infer<typeof HoldConflict>;
+
+export const OrderStatus = z.enum(["pending", "paid", "cancelled"]);
+export type OrderStatus = z.infer<typeof OrderStatus>;
+export const PaymentStatus = z.enum(["requested", "succeeded", "failed", "refund_pending", "refunded", "refund_failed"]);
+export type PaymentStatus = z.infer<typeof PaymentStatus>;
+
+// 주문 생성 201, 주문 조회, 취소 200이 함께 쓰는 모양(DESIGN 6.2 "화면이 받는 것").
+// 선점이 만료됐는데 정리 작업이 아직 돌지 않은 pending 주문은 cancelled(expired)로 보인다.
+// payBy(선점 만료 30초 전)가 결제 마감이다. 화면의 타이머는 serverTime으로 시계를 맞춰 payBy와 holdExpiresAt으로 돈다.
+// payments는 이 주문의 결제 전부(최신순)이고, tickets는 paid일 때 좌석마다 한 장이다.
+export const OrderView = z.object({
+  orderId: z.number().int().positive(),
+  holdId: z.number().int().positive(),
+  performanceId: z.number().int().positive(),
+  status: OrderStatus,
+  cancelReason: z.enum(["user", "expired"]).nullable(),
+  amount: z.number().int().nonnegative(),
+  items: z.array(
+    z.object({
+      seatId: z.number().int().positive(),
+      section: z.string(),
+      row: z.string(),
+      number: z.number().int().positive(),
+      grade: z.string(),
+      price: z.number().int().nonnegative(),
+    }),
+  ),
+  holdExpiresAt: z.iso.datetime({ offset: true }),
+  payBy: z.iso.datetime({ offset: true }),
+  serverTime: z.iso.datetime({ offset: true }),
+  payments: z.array(
+    z.object({
+      paymentId: z.number().int().positive(),
+      status: PaymentStatus,
+      amount: z.number().int().nonnegative(),
+      createdAt: z.iso.datetime({ offset: true }),
+      updatedAt: z.iso.datetime({ offset: true }),
+    }),
+  ),
+  tickets: z.array(z.object({ ticketId: z.number().int().positive(), seatId: z.number().int().positive() })),
+});
+export type OrderView = z.infer<typeof OrderView>;
+
+// 같은 Idempotency-Key의 요청을 아직 처리하고 있다. Retry-After 뒤 같은 키로 다시 보낸다.
+const RequestInProgress = z.object({ error: z.string(), code: z.literal("REQUEST_IN_PROGRESS") });
+
+// 같은 Idempotency-Key를 다른 요청에 썼다(422). 화면 버그라 새 키로 다시 시작한다.
+export const IdempotencyKeyReused = z.object({ error: z.string(), code: z.literal("IDEMPOTENCY_KEY_REUSED") });
+export type IdempotencyKeyReused = z.infer<typeof IdempotencyKeyReused>;
+
+// 주문 생성의 409.
+// HOLD_EXPIRED: 선점 시간이 끝났다(expiredAt). 좌석을 다시 고른다.
+// ORDER_EXISTS: 이 선점으로 만든 주문이 이미 있다(orderId). 그 주문으로 간다.
+// PRICE_MISSING: 가격이 없는 좌석이 있다. 선점 때 막으므로 보통은 나지 않는다.
+export const CreateOrderConflict = z.discriminatedUnion("code", [
+  z.object({ error: z.string(), code: z.literal("HOLD_EXPIRED"), expiredAt: z.iso.datetime({ offset: true }) }),
+  z.object({ error: z.string(), code: z.literal("ORDER_EXISTS"), orderId: z.number().int().positive() }),
+  PriceMissing,
+  RequestInProgress,
+]);
+export type CreateOrderConflict = z.infer<typeof CreateOrderConflict>;
