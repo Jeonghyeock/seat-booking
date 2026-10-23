@@ -91,6 +91,14 @@ describe("POST /holds/:id/orders, GET /orders/:id", () => {
     expect(rows).toEqual([{ status: "pending", amount: view.amount, user_id: userId, items: 2 }]);
   });
 
+  it("판매 종료 전에 잡은 선점은 판매 종료 뒤에도 주문할 수 있다(판매 종료는 새 선점만 막는다)", async () => {
+    const { performanceId, userId, hold } = await newHold();
+    await admin.query("update performances set sales_close_at = now() - interval '1 second' where id = $1", [performanceId]);
+    const res = await createOrder(hold.holdId, userId);
+    expect(res.statusCode).toBe(201);
+    expect(OrderView.parse(res.json())).toMatchObject({ status: "pending", holdExpiresAt: hold.expiresAt });
+  });
+
   it("같은 키로 다시 보내면 처음 응답을 그대로 돌려주고 Idempotent-Replayed를 붙인다. 주문은 하나다", async () => {
     const { userId, hold } = await newHold();
     const key = randomUUID();
