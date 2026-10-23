@@ -1,6 +1,9 @@
 import { createBrowserRouter, useParams } from "react-router";
 import { Layout } from "./components/Layout";
+import { RequireLogin } from "./components/RequireLogin";
 import { AuthPage } from "./pages/AuthPage";
+import { MyOrdersPage } from "./pages/MyOrdersPage";
+import { OrderPage } from "./pages/OrderPage";
 import { PerformancesPage } from "./pages/PerformancesPage";
 import { NotFoundPage, Placeholder } from "./pages/Placeholder";
 import { SeatMapPage } from "./pages/SeatMapPage";
@@ -17,6 +20,17 @@ function SeatMapRoute() {
   return id === null ? <NotFoundPage /> : <SeatMapPage key={id} performanceId={id} />;
 }
 
+function OrderRoute() {
+  const id = useIdParam();
+  return id === null ? (
+    <NotFoundPage />
+  ) : (
+    <RequireLogin>
+      <OrderPage key={id} orderId={id} />
+    </RequireLogin>
+  );
+}
+
 // 경로(DESIGN 6.5 경로). 주문 화면은 URL의 id만으로 다시 그린다(새로고침·뒤로 가기에 안전하다).
 export const router = createBrowserRouter([
   {
@@ -25,8 +39,15 @@ export const router = createBrowserRouter([
     children: [
       { index: true, element: <PerformancesPage /> },
       { path: "performances/:id", element: <SeatMapRoute /> },
-      { path: "orders/:id", element: <Placeholder title="주문" /> },
-      { path: "my/orders", element: <Placeholder title="내 예매" /> },
+      { path: "orders/:id", element: <OrderRoute /> },
+      {
+        path: "my/orders",
+        element: (
+          <RequireLogin>
+            <MyOrdersPage />
+          </RequireLogin>
+        ),
+      },
       { path: "login", element: <AuthPage key="login" mode="login" /> },
       { path: "signup", element: <AuthPage key="signup" mode="signup" /> },
       { path: "admin", element: <Placeholder title="관리자" /> },
