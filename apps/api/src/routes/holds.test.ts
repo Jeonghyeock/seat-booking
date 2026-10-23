@@ -176,6 +176,22 @@ describe("POST /performances/:id/holds", () => {
     expect([map.get(unpriced[0]!), map.get(priced)]).toEqual(["available", "available"]);
     const { rows } = await pool.query("select count(*) as n from holds where user_id = $1", [userId]);
     expect(rows[0].n).toBe(0);
+
+    // 가격 확인은 이 회차에 있는 좌석만 본다. 다른 회차의 같은 등급 좌석은 이 회차에서 가격이 없어도 SEAT_UNAVAILABLE이다
+    const other = await newPerformance(pool);
+    const { rows: sameGrade } = await pool.query<{ id: number }>(
+      "select id from seats where id = any($1::bigint[]) and grade = $2 order by id limit 1",
+      [other.seatIds, missing],
+    );
+    const foreign = sameGrade[0]!.id;
+    expect(conflict(await hold(performanceId, userId, [foreign]))).toMatchObject({
+      code: "SEAT_UNAVAILABLE",
+      seatIds: [foreign],
+    });
+    expect(conflict(await hold(performanceId, userId, [unpriced[0], foreign]))).toMatchObject({
+      code: "PRICE_MISSING",
+      seatIds: [unpriced[0]],
+    });
   });
 
   it("헤더가 없거나 형식이 틀리면 400, 없는 사용자는 401, 없는 회차는 404", async () => {
