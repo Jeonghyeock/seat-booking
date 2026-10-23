@@ -60,7 +60,10 @@ describe("GET /performances/:id/me", () => {
     const body = MyPerformance.parse(res.json());
     expect(body).toMatchObject({
       performanceId,
-      limit: { limit: 4, heldSeats: 2, purchasedSeats: 1, remaining: 1 },
+      limit: 4,
+      heldSeats: 2,
+      purchasedSeats: 1,
+      remaining: 1,
       holds: [
         { holdId: plain.holdId, expiresAt: plain.expiresAt, seatIds: plain.seatIds, orderId: null },
         { holdId: ordered.holdId, expiresAt: ordered.expiresAt, seatIds: ordered.seatIds, orderId: order.orderId },
@@ -73,7 +76,9 @@ describe("GET /performances/:id/me", () => {
       plain.holdId,
     ]);
     expect(MyPerformance.parse((await me(performanceId, userId!)).json())).toMatchObject({
-      limit: { heldSeats: 1, purchasedSeats: 1, remaining: 2 },
+      heldSeats: 1,
+      purchasedSeats: 1,
+      remaining: 2,
       holds: [{ holdId: ordered.holdId }],
     });
   });
@@ -84,7 +89,7 @@ describe("GET /performances/:id/me", () => {
     const held = await hold(performanceId, userId!, [seatIds[3]!, seatIds[1]!, seatIds[2]!]);
     const body = MyPerformance.parse((await me(performanceId, userId!)).json());
     expect(body.holds).toEqual([{ holdId: held.holdId, expiresAt: held.expiresAt, seatIds: held.seatIds, orderId: null }]);
-    expect(body.limit).toEqual({ limit: 4, heldSeats: 3, purchasedSeats: 0, remaining: 1 });
+    expect(body).toMatchObject({ limit: 4, heldSeats: 3, purchasedSeats: 0, remaining: 1 });
   });
 
   it("없는 사용자는 401, 없는 회차는 404, 선점이 없으면 빈 목록", async () => {
@@ -93,7 +98,9 @@ describe("GET /performances/:id/me", () => {
     expect((await me(performanceId, 999999999)).statusCode).toBe(401);
     expect((await me(999999999, userId!)).statusCode).toBe(404);
     expect(MyPerformance.parse((await me(performanceId, userId!)).json())).toMatchObject({
-      limit: { heldSeats: 0, purchasedSeats: 0, remaining: 4 },
+      heldSeats: 0,
+      purchasedSeats: 0,
+      remaining: 4,
       holds: [],
     });
   });
