@@ -156,7 +156,7 @@ export async function applyPaymentResult(
     .from(payments)
     .where(eq(payments.id, event.paymentId));
   if (!payment) {
-    log.warn({ event }, "웹훅: 모르는 결제");
+    log.warn({ event }, "결제 반영: 모르는 결제");
     return "unmatched";
   }
   // 결제사 번호가 이 결제의 것과 다르거나 다른 결제의 것이면 맞지 않는 웹훅이다. 채우면 provider_ref unique에 걸려
@@ -166,7 +166,7 @@ export async function applyPaymentResult(
     .from(payments)
     .where(and(eq(payments.providerRef, event.providerRef), ne(payments.id, event.paymentId)));
   if ((payment.providerRef !== null && payment.providerRef !== event.providerRef) || owner) {
-    log.warn({ event, providerRef: payment.providerRef }, "웹훅: 결제사 번호가 맞지 않음");
+    log.warn({ event, providerRef: payment.providerRef }, "결제 반영: 결제사 번호가 맞지 않음");
     return "unmatched";
   }
   if (event.type !== "payment.succeeded" && event.type !== "payment.failed") return "ignored";
@@ -184,7 +184,7 @@ export async function applyPaymentResult(
     if (status === "failed") {
       // 대사가 failed로 정한 뒤 결제사 쪽에서 늦게 성공했다. 돈을 받았으니 돌려준다.
       await setPaymentStatus(tx, event, "failed", "refund_pending");
-      log.warn({ event }, "웹훅: failed로 정한 결제에 성공이 와서 환불로 보냄");
+      log.warn({ event }, "결제 반영: failed로 정한 결제에 성공이 와서 환불로 보냄");
       return "processed";
     }
     return "ignored";
@@ -195,7 +195,7 @@ export async function applyPaymentResult(
   }
   if (status === "failed") return "ignored";
   // 결제사는 끝 상태를 바꾸지 않는다고 약속한다. 성공한 결제에 온 실패는 맞지 않는 웹훅이다.
-  log.warn({ event, status }, "웹훅: 끝난 결제에 실패가 옴");
+  log.warn({ event, status }, "결제 반영: 끝난 결제에 실패가 옴");
   return "unmatched";
 }
 
@@ -252,7 +252,7 @@ async function confirmPayment(tx: Tx, orderId: number, event: PaymentEvent, log:
   const { status, userId, holdId, performanceId } = order!;
   if (status !== "pending") {
     await setPaymentStatus(tx, event, "requested", "refund_pending");
-    log.warn({ event, orderStatus: status }, "웹훅: 끝난 주문의 결제가 성공해서 환불로 보냄");
+    log.warn({ event, orderStatus: status }, "결제 반영: 끝난 주문의 결제가 성공해서 환불로 보냄");
     return;
   }
 
@@ -269,7 +269,7 @@ async function confirmPayment(tx: Tx, orderId: number, event: PaymentEvent, log:
   if (checked.length === 0 || !checked.every((s) => s.ok)) {
     await setOrderFromPending(tx, orderId, { status: "cancelled", cancelReason: "expired" });
     await setPaymentStatus(tx, event, "requested", "refund_pending");
-    log.warn({ event }, "웹훅: 선점이 끝나 확정하지 못하고 환불로 보냄");
+    log.warn({ event }, "결제 반영: 선점이 끝나 확정하지 못하고 환불로 보냄");
     return;
   }
 
