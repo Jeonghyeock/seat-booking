@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { buildApp } from "./app.js";
 import { startCleanupLoop } from "./cleanup.js";
+import { loadAuthConfig } from "./config.js";
 import { createDb } from "./db/client.js";
 import { createPool } from "./db/pool.js";
 import { FakePaymentProvider } from "./fake-pay.js";
@@ -15,8 +16,15 @@ const host = process.env.HOST ?? "127.0.0.1";
 // 가짜 결제사의 웹훅 서명 비밀. 서명과 확인이 이 프로세스 안에서만 일어나므로, 없거나 비어 있으면 띄울 때마다 무작위로 만든다.
 const paymentProvider = new FakePaymentProvider(process.env.FAKE_PAY_SECRET || randomBytes(32).toString("hex"));
 
+// 화면의 origin(APP_ORIGIN), 쿠키 Secure(COOKIE_SECURE), 가입·로그인 분당 허용 수(DESIGN 6.3 설정).
+const auth = loadAuthConfig(process.env);
+
 const pool = createPool({ connectionString: databaseUrl });
-const app = buildApp(pool, { logger: true }, { paymentProvider });
+const app = buildApp(pool, { logger: true }, { paymentProvider, auth });
+app.log.info({ allowedOrigins: auth.allowedOrigins, cookieSecure: auth.cookieSecure }, "인증 설정");
+if (auth.allowedOrigins.length === 0) {
+  app.log.warn("APP_ORIGIN이 비어 있습니다. 브라우저가 보내는 상태 변경 요청(Origin이 붙음)은 모두 403입니다");
+}
 // 개발 서버에서는 웹훅을 delayMs 뒤 보내고, 받지 못하면 다시 보낸다.
 paymentProvider.useTimers(app.log);
 // 정리 작업(만료 선점 풀기, 주문 취소, 환불, 대사, 멱등 키 지우기)을 10초마다 돌린다.

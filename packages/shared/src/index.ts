@@ -47,6 +47,27 @@ export const AuthError = z.object({
 });
 export type AuthError = z.infer<typeof AuthError>;
 
+// ── 계정(DESIGN 6.3) ──
+
+// 가입·로그인 본문. 이메일은 앞뒤 공백을 지우고 소문자로 바꾼 뒤 형식을 본다(ASCII 이메일만).
+// 비밀번호는 서버가 NFKC로 정규화한 뒤 8~128자인지 본다. 여기서는 정규화 전 원문의 상한만 둔다(큰 입력이 메모리를 쓰지 않게).
+export const PASSWORD_MAX_INPUT_LENGTH = 1024;
+export const Credentials = z.object({
+  email: z.string().trim().toLowerCase().pipe(z.email().max(254)),
+  password: z.string().max(PASSWORD_MAX_INPUT_LENGTH),
+});
+export type Credentials = z.infer<typeof Credentials>;
+
+export const UserRole = z.enum(["customer", "admin"]);
+export const AuthUser = z.object({ userId: z.number().int().positive(), email: z.string(), role: UserRole });
+export type AuthUser = z.infer<typeof AuthUser>;
+
+// 가입 409: 이미 있는 이메일이다. 로그인 401: 이메일이 없는지, 비밀번호가 틀렸는지 나누지 않는다.
+export const EmailTaken = z.object({ error: z.string(), code: z.literal("EMAIL_TAKEN") });
+export const InvalidCredentials = z.object({ error: z.string(), code: z.literal("INVALID_CREDENTIALS") });
+// 비밀번호 해시가 밀려 있다(503, Retry-After). 잠시 뒤 다시 보낸다.
+export const TryAgainLater = z.object({ error: z.string(), code: z.literal("TRY_AGAIN_LATER") });
+
 export const SeatStatus = z.enum(["available", "held", "sold"]);
 export type SeatStatus = z.infer<typeof SeatStatus>;
 
