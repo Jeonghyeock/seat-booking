@@ -128,7 +128,7 @@
   ─웹훅 succeeded→ 결제 확정: 주문 paid, 결제 succeeded, 좌석 sold, 표 valid
    (주문이 이미 끝났거나 좌석이 만료됐으면 결제 refund_pending → 환불 작업이 refunded)
   ─웹훅 failed→ 결제 failed(주문은 pending, 선점이 유효하면 다시 결제)
-주문 pending ─사용자 취소→ cancelled(user), 좌석 available
+주문 pending ─사용자 취소→ cancelled(user, 선점이 이미 만료됐으면 expired), 좌석 available
 주문 pending ─선점 만료(정리 작업)→ cancelled(expired), 좌석 available
 ```
 
@@ -174,7 +174,7 @@
 | `POST /orders/:id/cancel` | 없음 | pending이면 cancelled로 바꾸고 좌석을 푼다. 이미 cancelled면 같은 결과를 돌려준다 | 200 `OrderView` / 409 `ORDER_NOT_CANCELLABLE`(paid) |
 | `POST /webhooks/fake-pay` | 결제사 서명 | 결제 결과를 반영한다 | 200(서명이 맞으면 중복·늦은·모르는 웹훅도 200) / 401(서명 틀림) / 400(본문 모양이 틀림, 10장 49) |
 
-취소에 멱등 키를 받지 않는 이유: 두 번 와도 두 번째는 0행이라 결과가 같다. 주문 생성과 결제 요청은 두 번 처리되면 행이 하나 더 생긴다(10장 21).
+취소에 멱등 키를 받지 않는 이유: 두 번 와도 두 번째는 이미 cancelled라 바꾸지 않고 같은 주문을 돌려준다. 주문 생성과 결제 요청은 두 번 처리되면 행이 하나 더 생긴다(10장 21).
 
 **화면이 받는 것.** 예매하는 사람 입장의 리뷰를 반영했다(10장 31~35).
 
@@ -214,7 +214,7 @@
 | cancelled | requested | "결제 결과 확인 중. 결제됐다면 자동 환불됩니다" |
 | cancelled | refund_pending·refunded·refund_failed | 환불 진행 중 / 환불 완료(금액·시각) / 환불 지연, 문의 |
 
-5단계 화면에서 지킬 것(지금 정해 둠): 좌석은 모아 한 번에 선점한다(묶음마다 주문·결제가 따로 생긴다). 본문 없는 결제 요청에는 `Content-Type`을 붙이지 않는다(빈 본문에 `application/json`이면 400). 화면이 다른 origin에서 돌면 `Retry-After`·`Idempotent-Replayed`를 읽도록 `Access-Control-Expose-Headers`에 넣는다. "내 예매"에는 paid뿐 아니라 결제가 붙은 cancelled 주문(환불 중·완료)도 넣는다. 관리자 판매 현황에 refund_failed 목록을 둔다.
+5단계 화면에서 지킬 것(지금 정해 둠): 좌석은 모아 한 번에 선점한다(묶음마다 주문·결제가 따로 생긴다). 본문 없는 결제 요청·취소에는 `Content-Type`을 붙이지 않는다(빈 본문에 `application/json`이면 400). 화면이 다른 origin에서 돌면 `Retry-After`·`Idempotent-Replayed`를 읽도록 `Access-Control-Expose-Headers`에 넣는다. "내 예매"에는 paid뿐 아니라 결제가 붙은 cancelled 주문(환불 중·완료)도 넣는다. 관리자 판매 현황에 refund_failed 목록을 둔다.
 
 **주문 생성.** 한 트랜잭션에서 선점이 이 사용자의 것이고 만료 전인지, 그 선점의 좌석이 모두 `held`로 남았는지 보고(좌석을 읽는 문장 안에서 `clock_timestamp()`로 만료를 본다. 문장이 기다린 사이 만료되어 다른 선점이 가져간 좌석만 빠진 주문이 생기지 않게), 좌석마다 그때의 등급 가격을 `order_items`에 복사한다. `orders.amount`는 그 합이다. 나중에 `performance_grades`의 가격이 바뀌어도 이미 낸 금액은 그대로다. 선점 하나에 주문 하나(`orders.hold_id` unique)라 다른 키로 두 번 와도 두 번째는 `ORDER_EXISTS`다.
 
@@ -252,7 +252,7 @@
 
 **실패 반영(payment.failed).** 주문 행을 잡고 결제를 requested → failed로 바꾼다. 주문은 pending으로 남고, 선점이 유효하면 다시 결제할 수 있다.
 
-**취소.** 주문 행을 잡고 pending → cancelled(user, 선점이 이미 만료됐으면 expired, 10장 53)로 바꾼 뒤, 이 선점의 `held` 좌석을 `seat_id` 순서로 잠가 `available`로 되돌린다(`status`·`hold_id`·`hold_expires_at`을 한 `UPDATE`에서 함께 비워 CHECK 두 개와 맞춘다). 이미 cancelled면 그대로 200, paid면 409다.
+**취소.** 주문 행을 잡고 pending → cancelled(user, 선점이 이미 만료됐으면 expired, 10장 53)로 바꾼 뒤, 이 선점의 `held` 좌석을 `seat_id` 순서로 잠가 `available`로 되돌린다(`status`·`hold_id`·`hold_expires_at`을 한 `UPDATE`에서 함께 비워 CHECK 두 개와 맞춘다). 이미 cancelled면 그대로 200, paid면 409다. 좌석을 만료 전에 빈 좌석으로 되돌리는 경로는 취소뿐이다. 그 좌석을 기다리던 다른 사용자의 선점은 문장 스냅샷에서 held(만료 전)로 본 행을 다시 보지 않으므로 `SEAT_UNAVAILABLE`을 받는다. 취소보다 먼저 온 것과 같은 결과라 틀리지 않고, 다시 보내면 잡힌다.
 
 **정리 작업.** 같은 프로세스에서 주기적으로 돈다(10초). 주기 실행은 서버를 띄우는 `main.ts`에서만 시작하고 `buildApp`에서는 시작하지 않는다. 테스트는 함수를 직접 부른다. 정리 작업은 표 전체를 훑어 바꾸므로, 그 테스트 파일은 다른 테스트 파일과 함께 쓰지 않는 DB(템플릿에서 따로 복제)에서 돈다(10장 50). 단계마다 따로 트랜잭션이고, 한 번에 최대 500행씩 처리한다. 1·2는 `SKIP LOCKED`라 잠긴 행을 기다리지 않고 건너뛴다. 3·4는 결제사를 부르는 동안 트랜잭션도 행 잠금도 쥐지 않는다(대사가 결제 행을 잠근 채 주문을 기다리면 웹훅 확정과 교착한다. 리뷰 실험 E5).
 
@@ -272,7 +272,7 @@ SKIP LOCKED는 다른 트랜잭션이 잠근 행을 기다리지 않고 건너�
 
 좌석이 두 번 팔리지 않는다. 받은 돈은 좌석으로 바뀌거나(succeeded) 환불로 간다(refund_pending → refunded). failed로 정한 결제에 성공이 늦게 와도 환불로 간다(웹훅 받기 3).
 
-**C5: 취소와 결제 확정이 겹칠 때.** 둘 다 주문 행을 먼저 잡는다. 취소가 이기면 확정의 3에서 pending이 아니라 결제 refund_pending. 확정이 이기면 취소는 409 `ORDER_NOT_CANCELLABLE`.
+**C5: 취소와 결제 확정이 겹칠 때.** 둘 다 주문 행을 먼저 잡는다. 취소가 이기면 확정의 3에서 pending이 아니라 결제 refund_pending. 확정이 이기면, paid로 바꿨으면 취소는 409 `ORDER_NOT_CANCELLABLE`이고, 선점이 만료돼 cancelled(expired)·refund_pending으로 바꿨으면 취소는 그 주문으로 200이다.
 
 **멱등성(`Idempotency-Key`).** 주문 생성과 결제 요청에 받는다. 키는 사용자와 경로마다 따로다(`(user_id, route, key)` PK). 같은 키를 다른 경로에 써도 서로의 응답을 받지 않는다.
 
