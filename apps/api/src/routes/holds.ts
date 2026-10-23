@@ -1,17 +1,18 @@
 import {
+  AuthError,
   ErrorResponse,
   HoldConflict,
   HoldRequest,
   HoldResponse,
   MyPerformance,
   PerformanceParams,
-  UserHeaders,
 } from "@seat-booking/shared";
 import { eq } from "drizzle-orm";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import type { Db } from "../db/client.js";
-import { performances, users } from "../db/schema.js";
+import { performances } from "../db/schema.js";
 import { type HoldFailure, holdSeats, myPerformance } from "../holds.js";
+import { currentUser } from "./session.js";
 
 // 409 본문. 화면에 띄울 문장과 다음 행동을 정할 값을 함께 준다.
 function conflictBody(failure: HoldFailure): HoldConflict {
@@ -47,16 +48,13 @@ export const holdRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db })
     {
       schema: {
         params: PerformanceParams,
-        headers: UserHeaders,
-        response: { 200: MyPerformance, 401: ErrorResponse, 404: ErrorResponse },
+        response: { 200: MyPerformance, 401: AuthError, 403: AuthError, 404: ErrorResponse },
       },
     },
     async (request, reply) => {
       const performanceId = request.params.id;
-      const userId = request.headers["x-user-id"];
+      const userId = currentUser(request).id;
 
-      const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
-      if (!user) return reply.code(401).send({ error: "없는 사용자입니다" });
       const [performance] = await db
         .select({ id: performances.id })
         .from(performances)
@@ -76,17 +74,14 @@ export const holdRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db })
     {
       schema: {
         params: PerformanceParams,
-        headers: UserHeaders,
         body: HoldRequest,
-        response: { 201: HoldResponse, 401: ErrorResponse, 404: ErrorResponse, 409: HoldConflict },
+        response: { 201: HoldResponse, 401: AuthError, 403: AuthError, 404: ErrorResponse, 409: HoldConflict },
       },
     },
     async (request, reply) => {
       const performanceId = request.params.id;
-      const userId = request.headers["x-user-id"];
+      const userId = currentUser(request).id;
 
-      const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
-      if (!user) return reply.code(401).send({ error: "없는 사용자입니다" });
       const [performance] = await db
         .select({ id: performances.id })
         .from(performances)

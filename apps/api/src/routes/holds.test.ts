@@ -1,6 +1,6 @@
 import { HoldConflict, HoldResponse, SeatMap } from "@seat-booking/shared";
 import { afterAll, describe, expect, inject, it } from "vitest";
-import { newPerformance, newUsers } from "../../test/fixtures.js";
+import { authHeaders, expectUnauthenticated, newPerformance, newSignedInUserIds, unauthenticatedHeaders } from "../../test/fixtures.js";
 import { buildApp } from "../app.js";
 import { createPool } from "../db/pool.js";
 
@@ -16,7 +16,7 @@ describe("POST /performances/:id/holds", () => {
     app.inject({
       method: "POST",
       url: `/performances/${performanceId}/holds`,
-      headers: userId === undefined ? {} : { "x-user-id": String(userId) },
+      headers: userId === undefined ? {} : authHeaders(userId),
       payload: { seatIds },
     });
 
@@ -32,7 +32,7 @@ describe("POST /performances/:id/holds", () => {
 
   it("빈 좌석을 선점하면 201이고, 좌석 지도에 held로 보이며, 좌석과 선점 행의 만료 시각이 같다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const [userId] = await newUsers(pool, 1);
+    const [userId] = await newSignedInUserIds(pool, 1);
 
     const res = await hold(performanceId, userId, [seatIds[1], seatIds[0]]);
     expect(res.statusCode).toBe(201);
@@ -59,7 +59,7 @@ describe("POST /performances/:id/holds", () => {
 
   it("담은 좌석 중 하나라도 선점돼 있으면 409이고, 나머지 좌석도 잡지 않는다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const [first, second] = await newUsers(pool, 2);
+    const [first, second] = await newSignedInUserIds(pool, 2);
     expect((await hold(performanceId, first, [seatIds[1]])).statusCode).toBe(201);
 
     // 안 되는 좌석만 돌려준다
@@ -74,7 +74,7 @@ describe("POST /performances/:id/holds", () => {
 
   it("만료된 선점은 좌석 지도에서 빈 좌석이고, 다른 사람이 다시 선점할 수 있다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const [first, second] = await newUsers(pool, 2);
+    const [first, second] = await newSignedInUserIds(pool, 2);
     const firstHold = HoldResponse.parse((await hold(performanceId, first, [seatIds[0]])).json());
 
     // 5분을 기다리지 않고 만료 시각을 과거로 돌린다(DESIGN 10장 2)
@@ -96,7 +96,7 @@ describe("POST /performances/:id/holds", () => {
   it("이 회차에 없는 좌석을 담으면 409 SEAT_UNAVAILABLE", async () => {
     const { performanceId } = await newPerformance(pool);
     const other = await newPerformance(pool);
-    const [userId] = await newUsers(pool, 1);
+    const [userId] = await newSignedInUserIds(pool, 1);
     expect(conflict(await hold(performanceId, userId, [other.seatIds[0]]))).toMatchObject({
       code: "SEAT_UNAVAILABLE",
       seatIds: [other.seatIds[0]],
@@ -105,7 +105,7 @@ describe("POST /performances/:id/holds", () => {
 
   it("판매가 열리기 전이나 판매 종료 뒤에는 409 SALES_CLOSED이고, 판단에 쓴 시각을 함께 준다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const [userId] = await newUsers(pool, 1);
+    const [userId] = await newSignedInUserIds(pool, 1);
 
     const opening = await pool.query(
       "update performances set sales_open_at = now() + interval '1 hour' where id = $1 returning sales_open_at, sales_close_at, starts_at",
@@ -139,7 +139,7 @@ describe("POST /performances/:id/holds", () => {
 
   it("판매 종료 직전에 잡은 선점도 5분을 다 받는다(판매 종료로 자르지 않는다)", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const [userId] = await newUsers(pool, 1);
+    const [userId] = await newSignedInUserIds(pool, 1);
     await pool.query("update performances set sales_close_at = now() + interval '1 minute' where id = $1", [performanceId]);
     const res = await hold(performanceId, userId, [seatIds[0]]);
     expect(res.statusCode).toBe(201);
@@ -149,7 +149,7 @@ describe("POST /performances/:id/holds", () => {
 
   it("공연 시작이 5분 안이면 선점은 공연 시작에 끝난다(판매 종료가 공연 시작과 같은 회차)", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const [userId] = await newUsers(pool, 1);
+    const [userId] = await newSignedInUserIds(pool, 1);
     await pool.query(
       "update performances set sales_close_at = now() + interval '2 minutes', starts_at = now() + interval '2 minutes' where id = $1",
       [performanceId],
@@ -173,7 +173,7 @@ describe("POST /performances/:id/holds", () => {
 
   it("담은 좌석 중 이 회차에 등급 가격이 없는 좌석이 있으면 409 PRICE_MISSING이고, 어느 좌석도 잡지 않는다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const [userId] = await newUsers(pool, 1);
+    const [userId] = await newSignedInUserIds(pool, 1);
     const { rows: grades } = await pool.query<{ seat_id: number; grade: string }>(
       "select id as seat_id, grade from seats where id = any($1::bigint[]) order by id",
       [seatIds],
@@ -209,18 +209,28 @@ describe("POST /performances/:id/holds", () => {
     });
   });
 
-  it("헤더가 없거나 형식이 틀리면 400, 없는 사용자는 401, 없는 회차는 404", async () => {
+  it("로그인하지 않았으면(쿠키 없음, X-User-Id만, 모양이 틀린 쿠키, 만료된 세션) 401이고 본문 검증보다 먼저다. 없는 회차는 404", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const [userId] = await newUsers(pool, 1);
-    expect((await hold(performanceId, undefined, [seatIds[0]])).statusCode).toBe(400);
-    expect((await hold(performanceId, "abc", [seatIds[0]])).statusCode).toBe(400);
-    expect((await hold(performanceId, 999999999, [seatIds[0]])).statusCode).toBe(401);
+    const [userId] = await newSignedInUserIds(pool, 1);
+    for (const [name, headers] of Object.entries(await unauthenticatedHeaders(pool))) {
+      for (const seatIdsBody of [[seatIds[0]], []]) {
+        const res = await app.inject({
+          method: "POST",
+          url: `/performances/${performanceId}/holds`,
+          headers,
+          payload: { seatIds: seatIdsBody },
+        });
+        expectUnauthenticated(res, name);
+      }
+    }
+    const { rows } = await pool.query("select count(*) as n from holds where performance_id = $1", [performanceId]);
+    expect(rows[0].n).toBe(0);
     expect((await hold(999999999, userId, [seatIds[0]])).statusCode).toBe(404);
   });
 
   it("좌석은 1~4개이고, 같은 좌석을 두 번 담으면 400", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const [userId] = await newUsers(pool, 1);
+    const [userId] = await newSignedInUserIds(pool, 1);
     for (const body of [[], seatIds.slice(0, 5), [seatIds[0], seatIds[0]], ["1"], [1.5]]) {
       expect((await hold(performanceId, userId, body)).statusCode, JSON.stringify(body)).toBe(400);
     }
@@ -241,7 +251,7 @@ describe("동시 선점", () => {
     app.inject({
       method: "POST",
       url: `/performances/${performanceId}/holds`,
-      headers: { "x-user-id": String(userId) },
+      headers: authHeaders(userId),
       payload: { seatIds },
     });
 
@@ -253,7 +263,7 @@ describe("동시 선점", () => {
 
   it("C1: 좌석 1개에 1,000명이 동시에 선점하면 201은 정확히 1개, 나머지 999개는 409", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const users = await newUsers(pool, 1000);
+    const users = await newSignedInUserIds(pool, 1000);
 
     const responses = await Promise.all(users.map((u) => hold(performanceId, u, [seatIds[0]!])));
     expect(countStatuses(responses.map((r) => r.statusCode))).toEqual({ 201: 1, 409: 999 });
@@ -271,7 +281,7 @@ describe("동시 선점", () => {
 
   it("만료된 선점에서 시작해도, 200명이 동시에 다시 선점하면 201은 정확히 1개", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const [first, ...others] = await newUsers(pool, 201);
+    const [first, ...others] = await newSignedInUserIds(pool, 201);
     const old = HoldResponse.parse((await hold(performanceId, first!, [seatIds[0]!])).json());
     await pool.query("update holds set expires_at = now() - interval '1 second' where id = $1", [old.holdId]);
     await pool.query("update performance_seats set hold_expires_at = now() - interval '1 second' where hold_id = $1", [
@@ -292,7 +302,7 @@ describe("동시 선점", () => {
   it("C2: 좌석 20개에 400명이 1~4석씩 몰려도 같은 좌석을 두 사람이 선점하지 않는다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
     const contested = seatIds.slice(0, 20);
-    const users = await newUsers(pool, 400);
+    const users = await newSignedInUserIds(pool, 400);
 
     // 사용자 i는 1~4석을 담는다. (i*7 + j*5) % 20은 j가 0~3일 때 서로 달라 같은 좌석이 겹치지 않는다. 홀수 번째는 거꾸로 담는다.
     const requests = users.map((u, i) => {
@@ -322,7 +332,7 @@ describe("동시 선점", () => {
   // 하나씩 잠그는 구현으로 바뀌는 것을 잡는다. SQL 안의 잠금 순서는 hold-races.test.ts의 실행 계획 테스트가 지킨다.
   it("좌석을 서로 반대 순서로 담은 요청이 동시에 와도 교착 없이 끝난다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const users = await newUsers(pool, 200);
+    const users = await newSignedInUserIds(pool, 200);
     const groups = Array.from({ length: 20 }, (_, g) => seatIds.slice(g * 4, g * 4 + 4));
 
     const requests = users.map((u, i) => {

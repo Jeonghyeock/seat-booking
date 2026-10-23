@@ -30,6 +30,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      # 3단계까지 쓰던 X-User-Id 헤더로 사용자를 정하는 코드가 남으면 누구로든 행세할 수 있다(DESIGN 6.3). 테스트 파일은 뺀다.
+      - name: X-User-Id가 코드에 남지 않았는지
+        run: "! grep -rIni --include='*.ts' --exclude='*.test.ts' 'x-user-id' apps/api/src packages/shared/src"
       # 로컬과 같게 슈퍼유저가 아닌 앱 role로 마이그레이션과 테스트를 돌린다.
       # 비밀번호는 실행마다 새로 만들어, 저장소에 비밀번호 글자가 남지 않게 한다.
       - name: 앱 role과 DB 만들기(README의 로컬 준비와 같음)

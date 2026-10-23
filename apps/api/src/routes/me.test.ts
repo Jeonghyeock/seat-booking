@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { HoldResponse, MyPerformance, OrderView } from "@seat-booking/shared";
 import { afterAll, describe, expect, inject, it } from "vitest";
-import { newPerformance, newUsers } from "../../test/fixtures.js";
+import { authHeaders, expectUnauthenticated, newPerformance, newSignedInUserIds, unauthenticatedHeaders } from "../../test/fixtures.js";
 import { buildApp } from "../app.js";
 import { createPool } from "../db/pool.js";
 
@@ -19,18 +19,18 @@ describe("GET /performances/:id/me", () => {
         await app.inject({
           method: "POST",
           url: `/performances/${performanceId}/holds`,
-          headers: { "x-user-id": String(userId) },
+          headers: authHeaders(userId),
           payload: { seatIds },
         })
       ).json(),
     );
   const me = (performanceId: number, userId: number) =>
-    app.inject({ method: "GET", url: `/performances/${performanceId}/me`, headers: { "x-user-id": String(userId) } });
+    app.inject({ method: "GET", url: `/performances/${performanceId}/me`, headers: authHeaders(userId) });
 
   it("유효한 선점(좌석·만료 시각·붙은 주문)과 한도를 보여 주고, 만료된 선점·팔린 선점·풀린 좌석은 선점으로 보이지 않는다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
     const other = await newPerformance(pool);
-    const [userId, stranger] = await newUsers(pool, 2);
+    const [userId, stranger] = await newSignedInUserIds(pool, 2);
 
     const plain = await hold(performanceId, userId!, [seatIds[1]!]);
     const ordered = await hold(performanceId, userId!, [seatIds[2]!]);
@@ -39,7 +39,7 @@ describe("GET /performances/:id/me", () => {
         await app.inject({
           method: "POST",
           url: `/holds/${ordered.holdId}/orders`,
-          headers: { "x-user-id": String(userId), "idempotency-key": randomUUID() },
+          headers: { ...authHeaders(userId), "idempotency-key": randomUUID() },
         })
       ).json(),
     );
@@ -85,17 +85,19 @@ describe("GET /performances/:id/me", () => {
 
   it("여러 좌석의 선점은 좌석을 한 선점으로 묶어 보여 준다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const [userId] = await newUsers(pool, 1);
+    const [userId] = await newSignedInUserIds(pool, 1);
     const held = await hold(performanceId, userId!, [seatIds[3]!, seatIds[1]!, seatIds[2]!]);
     const body = MyPerformance.parse((await me(performanceId, userId!)).json());
     expect(body.holds).toEqual([{ holdId: held.holdId, expiresAt: held.expiresAt, seatIds: held.seatIds, orderId: null }]);
     expect(body).toMatchObject({ limit: 4, heldSeats: 3, purchasedSeats: 0, remaining: 1 });
   });
 
-  it("없는 사용자는 401, 없는 회차는 404, 선점이 없으면 빈 목록", async () => {
+  it("로그인하지 않았으면 401, 없는 회차는 404, 선점이 없으면 빈 목록", async () => {
     const { performanceId } = await newPerformance(pool);
-    const [userId] = await newUsers(pool, 1);
-    expect((await me(performanceId, 999999999)).statusCode).toBe(401);
+    const [userId] = await newSignedInUserIds(pool, 1);
+    for (const [name, headers] of Object.entries(await unauthenticatedHeaders(pool))) {
+      expectUnauthenticated(await app.inject({ method: "GET", url: `/performances/${performanceId}/me`, headers }), name);
+    }
     expect((await me(999999999, userId!)).statusCode).toBe(404);
     expect(MyPerformance.parse((await me(performanceId, userId!)).json())).toMatchObject({
       heldSeats: 0,

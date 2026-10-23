@@ -49,3 +49,19 @@ describe("GET /health", () => {
     }
   });
 });
+
+describe("경로 범위", () => {
+  const pool = createPool({ connectionString: inject("databaseUrl") });
+  const app = buildApp(pool);
+  afterAll(async () => {
+    await app.close();
+    await pool.end();
+  });
+
+  it("세션 확인은 사용자 경로에만 걸린다. 없는 경로는 401이 아니라 404이고, 공개 경로는 로그인 없이 된다", async () => {
+    expect((await app.inject({ method: "POST", url: "/nope" })).statusCode).toBe(404);
+    expect((await app.inject({ method: "GET", url: "/orders/1/nope" })).statusCode).toBe(404);
+    expect((await app.inject({ method: "GET", url: "/performances" })).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: "/health" })).statusCode).toBe(200);
+  });
+});
