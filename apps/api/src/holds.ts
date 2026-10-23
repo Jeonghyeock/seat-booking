@@ -1,7 +1,7 @@
-import { SEAT_LIMIT_PER_USER } from "@seat-booking/shared";
-import { eq, sql } from "drizzle-orm";
+import { type MyPerformance, SEAT_LIMIT_PER_USER } from "@seat-booking/shared";
+import { and, asc, eq, gte, sql } from "drizzle-orm";
 import type { Db, Tx } from "./db/client.js";
-import { holds, performances } from "./db/schema.js";
+import { holds, orders, performanceSeats, performances } from "./db/schema.js";
 
 // 선점 유지 시간(DESIGN 10장 2).
 export const HOLD_TTL_SECONDS = 5 * 60;
@@ -154,4 +154,52 @@ export function holdSeats(db: Db, input: HoldInput): Promise<HoldResult> {
       return holdWithinTx(tx, input);
     }),
   );
+}
+
+// 이 회차에서 내 유효한 선점과 한도(GET /performances/:id/me). 부르는 쪽이 한 스냅샷(읽기 전용 트랜잭션)에서 부른다.
+// 유효한 선점은 "좌석이 이 선점으로 아직 held이고 만료 전"이다. 주문을 취소해도 holds.expires_at은 미래로 남으므로
+// 선점 행이 아니라 좌석으로 거른다(DESIGN 6.2 "화면이 받는 것").
+export async function myPerformance(tx: Tx, userId: number, performanceId: number): Promise<MyPerformance> {
+  const counted = await countLimitSeats(tx, userId, performanceId);
+  const rows = await tx
+    .select({
+      holdId: holds.id,
+      expiresAt: holds.expiresAt,
+      seatId: performanceSeats.seatId,
+      orderId: orders.id,
+    })
+    .from(holds)
+    .innerJoin(
+      performanceSeats,
+      and(
+        eq(performanceSeats.holdId, holds.id),
+        eq(performanceSeats.status, "held"),
+        gte(performanceSeats.holdExpiresAt, sql`now()`),
+      ),
+    )
+    .leftJoin(orders, eq(orders.holdId, holds.id))
+    .where(and(eq(holds.userId, userId), eq(holds.performanceId, performanceId)))
+    .orderBy(asc(holds.id), asc(performanceSeats.seatId));
+
+  const byHold = new Map<number, MyPerformance["holds"][number]>();
+  for (const r of rows) {
+    const hold = byHold.get(r.holdId) ?? { holdId: r.holdId, expiresAt: r.expiresAt.toISOString(), seatIds: [], orderId: r.orderId };
+    hold.seatIds.push(r.seatId);
+    byHold.set(r.holdId, hold);
+  }
+  // tx.execute와 sql 조각은 timestamptz를 문자열로 돌려주므로, timestamptz 열의 변환으로 Date를 받는다.
+  const [now] = await tx
+    .select({ serverTime: sql`now()`.mapWith(performances.startsAt) })
+    .from(performances)
+    .where(eq(performances.id, performanceId));
+  return {
+    performanceId,
+    serverTime: now!.serverTime.toISOString(),
+    limit: {
+      limit: SEAT_LIMIT_PER_USER,
+      ...counted,
+      remaining: Math.max(0, SEAT_LIMIT_PER_USER - counted.heldSeats - counted.purchasedSeats),
+    },
+    holds: [...byHold.values()],
+  };
 }

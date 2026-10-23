@@ -3,6 +3,7 @@ import {
   HoldConflict,
   HoldRequest,
   HoldResponse,
+  MyPerformance,
   PerformanceParams,
   UserHeaders,
 } from "@seat-booking/shared";
@@ -10,7 +11,7 @@ import { eq } from "drizzle-orm";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import type { Db } from "../db/client.js";
 import { performances, users } from "../db/schema.js";
-import { type HoldFailure, holdSeats } from "../holds.js";
+import { type HoldFailure, holdSeats, myPerformance } from "../holds.js";
 
 // 409 본문. 화면에 띄울 문장과 다음 행동을 정할 값을 함께 준다.
 function conflictBody(failure: HoldFailure): HoldConflict {
@@ -40,6 +41,35 @@ function conflictBody(failure: HoldFailure): HoldConflict {
 }
 
 export const holdRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db }) => {
+  app.get(
+    "/performances/:id/me",
+    {
+      schema: {
+        params: PerformanceParams,
+        headers: UserHeaders,
+        response: { 200: MyPerformance, 401: ErrorResponse, 404: ErrorResponse },
+      },
+    },
+    async (request, reply) => {
+      const performanceId = request.params.id;
+      const userId = request.headers["x-user-id"];
+
+      const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
+      if (!user) return reply.code(401).send({ error: "없는 사용자입니다" });
+      const [performance] = await db
+        .select({ id: performances.id })
+        .from(performances)
+        .where(eq(performances.id, performanceId));
+      if (!performance) return reply.code(404).send({ error: "회차를 찾을 수 없습니다" });
+
+      // 한도와 선점 목록을 한 스냅샷에서 읽어 서로 맞게 한다.
+      return db.transaction((tx) => myPerformance(tx, userId, performanceId), {
+        isolationLevel: "repeatable read",
+        accessMode: "read only",
+      });
+    },
+  );
+
   app.post(
     "/performances/:id/holds",
     {
