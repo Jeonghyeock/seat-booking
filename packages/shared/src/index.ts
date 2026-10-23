@@ -282,3 +282,51 @@ export const PaymentProviderUnavailable = z.object({
   paymentId: z.number().int().positive(),
 });
 export type PaymentProviderUnavailable = z.infer<typeof PaymentProviderUnavailable>;
+
+// ── 관리자(DESIGN 6.3 관리자 기능) ──
+
+export const PaymentParams = z.object({ id: IdString });
+
+const Count = z.number().int().nonnegative();
+
+// 회차 판매 현황. 한 스냅샷에서 센다. 만료된 선점은 빈 좌석, 선점이 만료된 pending 주문은 cancelled다(좌석 지도·주문 조회와 같다).
+// revenue는 paid 주문 금액의 합이다. payments는 결제 상태마다 수다(0인 상태도 있다).
+export const PerformanceSales = z.object({
+  performanceId: z.number().int().positive(),
+  seats: z.object({ total: Count, available: Count, held: Count, sold: Count }),
+  orders: z.object({ pending: Count, paid: Count, cancelled: Count }),
+  revenue: Count,
+  payments: z.record(PaymentStatus, Count),
+  serverTime: z.iso.datetime({ offset: true }),
+});
+export type PerformanceSales = z.infer<typeof PerformanceSales>;
+
+// 결제 목록은 지금 환불 실패만 본다.
+export const PaymentListQuery = z.object({ status: z.literal("refund_failed") });
+
+// 환불이 다섯 번 실패한 결제. 최근 바뀐 것부터 100개이고, 더 있으면 hasMore다.
+export const RefundFailedPayments = z.object({
+  payments: z.array(
+    z.object({
+      paymentId: z.number().int().positive(),
+      orderId: z.number().int().positive(),
+      userId: z.number().int().positive(),
+      email: z.string(),
+      amount: Count,
+      refundAttempts: Count,
+      createdAt: z.iso.datetime({ offset: true }),
+      updatedAt: z.iso.datetime({ offset: true }),
+    }),
+  ),
+  hasMore: z.boolean(),
+});
+export type RefundFailedPayments = z.infer<typeof RefundFailedPayments>;
+
+// 환불 다시 시도 200. 다음 정리 작업이 환불한다.
+export const RefundRetried = z.object({ paymentId: z.number().int().positive(), status: z.literal("refund_pending") });
+// 환불 다시 시도 409: 환불이 실패한 결제가 아니다(지금 상태를 함께 준다).
+export const PaymentNotRetryable = z.object({
+  error: z.string(),
+  code: z.literal("PAYMENT_NOT_RETRYABLE"),
+  status: PaymentStatus,
+});

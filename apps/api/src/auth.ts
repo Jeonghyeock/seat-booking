@@ -107,9 +107,11 @@ export function newSessionToken() {
 
 // 세션을 만든다. 이 사용자의 세션은 방금 만든 것과 그 밖의 최근 것을 합쳐 MAX_SESSIONS_PER_USER개만 남긴다.
 // 만료는 넣는 순간의 역할로 정한다. 호출자가 앞서 읽은 역할을 쓰면, 그사이 관리자로 올린 사용자가 7일짜리 세션을 받는다.
+// 사용자 행은 FOR SHARE로 읽는다. 관리자로 올리는 트랜잭션(역할 바꾸기 + 세션 모두 지우기)과 겹치면 그것이 끝난 뒤의 역할로 정한다.
+// 잠그지 않으면 문장을 시작할 때의 역할(손님)로 7일짜리 세션을 만들고, 그 세션은 승격이 세션을 지운 뒤에 들어가 남는다.
 export async function createSession(db: Db | Tx, userId: number) {
   const { token, tokenHash } = newSessionToken();
-  const ttl = sql`case (select role from users where id = ${userId})
+  const ttl = sql`case (select role from users where id = ${userId} for share)
                     when 'admin' then ${SESSION_TTL_SECONDS.admin}::int else ${SESSION_TTL_SECONDS.customer}::int end`;
   const [created] = await db
     .insert(sessions)
