@@ -215,8 +215,14 @@ describe("개발 시드 날짜 옮기기", () => {
     new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit" }).format(new Date(iso));
 
   it("모든 시각을 같은 날 수만큼 옮겨 가장 이른 판매 시작이 지난 24시간 안에 오고, KST 벽시계 시각은 그대로다", () => {
-    // KST 자정 직후, UTC 자정 직후, 샘플 날짜보다 뒤
-    for (const now of [new Date("2026-10-24T15:00:30Z"), new Date("2026-10-24T00:00:30Z"), new Date("2027-06-01T03:00:00Z")]) {
+    // KST 자정 직후, UTC 자정 직후, 샘플 날짜보다 뒤, 가장 이른 판매 시작에서 딱 하루의 배수만큼 앞(판매 시작이 정확히 24시간 전이 된다)
+    const earliestOpen = Math.min(...data.shows.flatMap((s) => s.performances.map((p) => Date.parse(p.salesOpenAt))));
+    for (const now of [
+      new Date("2026-10-24T15:00:30Z"),
+      new Date("2026-10-24T00:00:30Z"),
+      new Date("2027-06-01T03:00:00Z"),
+      new Date(earliestOpen - 28 * DAY),
+    ]) {
       const shifted = shiftSeed(data, now);
       const deltas = instants(shifted).map((t, i) => t - instants(data)[i]!);
       expect(new Set(deltas).size, now.toISOString()).toBe(1);
