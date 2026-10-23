@@ -1,0 +1,13 @@
+{
+  // 화면 코드. 공통 설정은 Node(NodeNext)용이라 번들러 해석·DOM·JSX로 바꾼다(DESIGN 6.5 배치와 설정).
+  // TS 6은 types 기본값이 비어 있어, vite/client를 넣어야 CSS 모듈과 import.meta.env를 안다.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["vite/client"]
+  },
+  "include": ["src"]
+}

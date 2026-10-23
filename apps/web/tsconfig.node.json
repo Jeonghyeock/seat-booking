@@ -1,0 +1,10 @@
+{
+  // Node에서 도는 설정 파일(vite.config.ts). 화면 코드에 node 타입이 섞이지 않게 따로 본다.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"]
+  },
+  "include": ["vite.config.ts"]
+}
