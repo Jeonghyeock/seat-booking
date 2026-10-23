@@ -208,10 +208,12 @@
 | 주문 | 결제 | 화면 |
 |---|---|---|
 | pending, `payBy` 전 | 없음, 또는 마지막이 failed | 결제하기(남은 시간) / "결제 실패, 다시 시도" |
+| pending, `payBy` 뒤 | requested 없음 | 결제 마감. 선점이 끝날 때까지 "좌석 다시 선택"만 |
+| pending | refund_*(앞 결제가 늦게 성공) | 결제하기 + "앞 결제 n원 환불 중·완료" |
 | pending | requested | "결제 확인 중", 취소는 숨기거나 "결제됐다면 자동 환불"을 확인받는다 |
-| paid | succeeded(다른 결제가 refund_*일 수 있음) | 예매 완료와 표 / "중복 결제 n원 환불 중·완료" |
+| paid | succeeded(다른 결제가 refund_*일 수 있음) | 예매 완료와 표 / "중복 결제 n원 환불 중·완료·지연(문의)" |
 | cancelled(user·expired) | 없음, 또는 failed | 취소됨 / 시간 초과 → 좌석 다시 고르기 |
-| cancelled | requested | "결제 결과 확인 중. 결제됐다면 자동 환불됩니다" |
+| cancelled | requested | "결제 결과 확인 중. 결제됐다면 자동 환불됩니다". 끝난 상태가 아니다(확정이 잠금을 기다리던 중이면 paid가 될 수 있다, C3) |
 | cancelled | refund_pending·refunded·refund_failed | 환불 진행 중 / 환불 완료(금액·시각) / 환불 지연, 문의 |
 
 5단계 화면에서 지킬 것(지금 정해 둠): 좌석은 모아 한 번에 선점한다(묶음마다 주문·결제가 따로 생긴다). 판매 종료 뒤에는 주문을 취소하면("좌석 다시 선택") 다시 선점할 수 없으므로, 그 버튼을 숨기거나 확인받는다. 판매 종료는 좌석 지도(또는 목록)의 `performance.salesCloseAt`에서 받아 "예매 마감 MM/DD HH:mm"로 보여 주고, 판매 시작·종료에 맞춰 선점 버튼을 켜고 끌 때는 좌석 지도의 `serverTime`으로 시계를 맞춘다. 주문 화면(`OrderView`)에는 판매 종료를 넣지 않는다(멱등 키로 저장한 응답의 모양이 바뀌지 않게). 본문 없는 POST(결제 요청·취소·로그아웃·환불 다시 시도)에는 `Content-Type`을 붙이지 않는다(빈 본문에 `application/json`이면 400). 관리자 회차 등록 폼은 시각을 초와 KST 오프셋까지 붙여 보낸다(`2027-03-01T19:00:00+09:00`, `datetime-local` 값 그대로는 400, 브라우저 시간대를 따르는 `toISOString()`도 쓰지 않는다). 응답 시각은 UTC라 `Asia/Seoul`로 바꿔 보인다. 작품은 고른 id나 새 제목 중 하나만 보낸다. 화면은 API와 같은 origin(Vite 프록시)이라 `Retry-After`·`Idempotent-Replayed`를 그대로 읽는다(10장 62). "내 예매"에는 paid뿐 아니라 결제가 붙은 cancelled 주문(환불 중·완료)도 넣는다. 관리자 판매 현황에 refund_failed 목록을 둔다.
@@ -389,55 +391,95 @@ bus-review에서는 Supabase가 대신 해 줬던 부분을 직접 만든다. 3�
 
 ### 6.5 화면 (5단계)
 
-**범위.** 공연 목록, 좌석 지도(고르기·선점), 주문(선점 타이머·결제·취소), 내 예매, 로그인·가입, 최소 관리자(판매 현황, 환불 실패 다시 시도, 회차 등록)다. 완료 기준은 Playwright E2E 하나다(가입 → 선점 → 결제 → 내 예매, 8장). 꾸밈보다 상태 문구와 좌석 지도의 접근성에 힘을 쓴다.
+**범위.** 공연 목록, 좌석 지도(고르기·선점), 주문(선점 타이머·결제·취소), 내 예매, 로그인·가입, 최소 관리자(판매 현황, 환불 실패 다시 시도, 회차 등록)다. 완료 기준은 Playwright E2E 하나다(가입 → 선점 → 결제 → 내 예매, 8장). E2E는 성공 흐름만 지나므로 유실·503·만료·두 탭·401은 순수 함수 단위 테스트가 지킨다. 꾸밈보다 상태 문구와 좌석 지도의 접근성에 힘을 쓴다.
 
-**스택.** React 19, Vite 8, TypeScript, TanStack Query 5(서버 상태), React Router 8(`createBrowserRouter`), CSS Modules다. UI 라이브러리는 쓰지 않는다. 응답은 `packages/shared`의 zod 스키마로 파싱한다(API 검증과 같은 정의). 단위·컴포넌트 테스트는 Vitest와 Testing Library(jsdom), E2E는 Playwright(chromium)다. 버전은 나온 지 2주가 지난 것 중 최신으로 고른다.
+**스택.** React 19, Vite 8, TypeScript, TanStack Query 5(서버 상태), React Router 8(`createBrowserRouter`), CSS Modules다. UI 라이브러리는 쓰지 않는다. 응답은 `packages/shared`의 zod 스키마로 파싱한다(API 검증과 같은 정의). 단위·컴포넌트 테스트는 Vitest와 Testing Library(jsdom), E2E는 Playwright(chromium)다. 버전은 나온 지 2주가 지난 것 중 최신으로 고르고 `--save-exact`로 넣는다(루트에 이미 있는 vitest는 예외). jsdom은 이 PC의 Node(24.12)를 받는 29.x다(30은 24.15 이상).
 
-**배치.** 개발은 Vite(5173)가 `/api/*`를 API(3001)로 넘기며 `/api`를 뗀다(10장 62). 프록시 대상은 환경 변수로 바꾼다(E2E는 3101). 프록시는 `Origin`을 바꾸지 않으므로 `APP_ORIGIN`은 화면 주소와 정확히 같아야 한다. `apps/web`의 tsconfig는 공통 설정(NodeNext)을 그대로 쓰지 않는다(번들러 해석, DOM, JSX).
+**배치와 설정.**
+- 개발은 Vite(5173)가 `^/api/`를 API(3001)로 넘기며 `/api`를 뗀다(10장 62). 프록시 대상은 환경 변수로 바꾼다(E2E는 3101). Vite는 `strictPort`로 띄운다(바쁜 포트면 다음 포트로 옮겨 가 E2E 포트를 차지하지 않게).
+- 프록시는 `Origin`을 바꾸지 않으므로 `APP_ORIGIN`은 브라우저 주소와 정확히 같아야 한다. 개발 `.env`에 `.env.example`의 `APP_ORIGIN`·`COOKIE_SECURE`가 없으면 모든 POST가 403이고 쿠키가 `__Host-sid`가 된다(화면 뼈대 PR에서 안내한다).
+- `apps/web`의 tsconfig는 공통 설정을 이어받되 `module: ESNext`, `moduleResolution: bundler`, `lib: [ES2023, DOM, DOM.Iterable]`, `jsx: react-jsx`, `types: ["vite/client"]`로 바꾼다(TS 6은 `types` 기본값이 비어 있어 CSS 모듈·`import.meta.env`가 오류다). `vite.config.ts`·Playwright 설정은 `tsconfig.node.json`으로 따로 본다(DOM 프로그램에 node 타입이 섞이지 않게). Vitest는 `src/**/*.test.{ts,tsx}`만 잡고(e2e 파일 제외), 설정 파일에서 테스트마다 `cleanup`한다.
+
+**경로.** `/`(공연 목록), `/performances/:id`(좌석 지도), `/orders/:id`(주문), `/my/orders`(내 예매), `/login?next=`, `/signup?next=`, `/admin`, `/admin/performances/:id/sales`, `/admin/refunds`, `/admin/performances/new`다.
+- 주문 화면은 URL의 id만으로 다시 그린다(새로고침·뒤로 가기에 안전하다). 선점과 주문 생성이 끝나면 `/orders/:id`로 push한다. 로그인·가입에 성공하면 `next`로 replace한다.
+- `next`는 `/`로 시작하고 `//`로 시작하지 않을 때만 받는다(열린 리다이렉트를 막는다). 로그인↔가입 링크는 `next`를 넘긴다.
+- 로그인이 필요한 화면(주문, 내 예매)과 관리자 화면은 `["me"]`를 다 읽은 뒤에 판단한다.
 
 **API 클라이언트.** 모든 요청을 fetch 한 곳에서 보낸다.
-- 모든 요청에 `X-Requested-With: seat-booking`과 `credentials: "same-origin"`을 붙인다. `Content-Type: application/json`은 본문이 있을 때만 붙인다(본문 없는 POST에 붙이면 400).
-- 2xx는 그 경로의 응답 스키마로 파싱한다(어긋나면 화면 버그로 본다). 4xx·5xx는 `ApiError { status, body, retryAfter }`로 던지고, 화면이 그 경로의 오류 스키마(`HoldConflict` 등)로 가른다.
-- 401이면 `me`를 비우고 로그인 화면으로 보낸다(돌아올 경로를 함께). 403 `CSRF_REJECTED`는 화면 버그다.
+- 모든 요청에 `X-Requested-With: seat-booking`을 붙인다(같은 origin이라 쿠키는 fetch 기본값으로 간다). `Content-Type: application/json`은 본문이 있을 때만 붙인다(본문 없는 POST에 붙이면 400).
+- 2xx는 그 경로의 응답 스키마로 파싱한다(어긋나면 화면 버그로 본다). 4xx·5xx는 `ApiError { status, code, body, retryAfter }`로 던지고, 화면이 그 경로의 오류 스키마(`HoldConflict` 등)로 가른다.
+- 시계 표본(아래)과 `Idempotent-Replayed`는 이 자리에서 읽는다.
+
+**인증 오류.** (경로, status, code) → 할 일을 순수 함수로 두고 단위 테스트한다.
+- `GET /auth/me`의 401은 "로그인 전"이다. `["me"]`를 null로 두고 아무 데도 보내지 않는다. 공연 목록과 좌석 지도는 로그인 전에도 쓴다.
+- 로그인이 필요한 조회(`["myPerformance", id]`, `["order", id]`, `["orders"]`, `["admin", …]`)는 `me`가 있을 때만 켠다.
+- 그 밖의 경로에서 401 `UNAUTHENTICATED`가 오면(세션 만료) `["me"]`를 null로 하고 사용자 캐시를 지운다. 로그인 화면으로는 지금 화면이 로그인을 요구할 때(주문, 내 예매, 관리자)만 돌아올 경로와 함께 보낸다. 좌석 지도에서는 "다시 로그인해 주세요"만 보인다.
+- 가입·로그인 경로의 400·401·409·429·503은 폼에 보일 문구이고 위 규칙을 타지 않는다.
+- 403 `FORBIDDEN`이면 "권한 없음"을 보이고 `["me"]`를 다시 읽는다(관리자에서 내려갔을 수 있다). 403 `CSRF_REJECTED`는 화면 버그다.
+- 창으로 돌아오면 `["me"]`를 다시 읽는다. 사용자가 바뀌었으면(다른 탭에서 로그아웃·다른 계정 로그인) 사용자 캐시를 지운다.
 
 **서버 상태와 화면 상태.**
-- 서버 상태는 TanStack Query 캐시에만 둔다. 키는 `["me"]`, `["performances"]`, `["seatMap", id]`, `["myPerformance", id]`, `["order", id]`, `["orders"]`, `["admin", …]`다. 선점·주문·결제의 상태는 서버만 정한다. 화면은 응답을 보여 주고, 바꾼 뒤에는 관련 키를 무효로 해 다시 읽는다. 낙관적 갱신은 하지 않는다(좌석은 그사이 다른 사람이 가져갈 수 있다).
-- 화면 상태는 고른 좌석 id, 고른 결제 상황, 멱등 키(`sessionStorage`, 6.2 "멱등 키의 수명"), 시계 차이뿐이다. 고른 좌석은 로그인하러 갔다 와도 남게 회차별로 `sessionStorage`에 둔다.
-- 로그인·로그아웃하면 캐시를 모두 비운다(다른 사용자의 주문이 남아 보이지 않게).
+- 서버 상태는 TanStack Query 캐시에만 둔다. 키는 `["me"]`, `["performances"]`, `["seatMap", id]`, `["myPerformance", id]`, `["order", id]`, `["orders"]`, `["admin", …]`다. 선점·주문·결제의 상태는 서버만 정한다. 낙관적 갱신은 하지 않는다(좌석은 그사이 다른 사람이 가져갈 수 있다).
+- 화면 상태는 고른 좌석 id, 고른 결제 상황, 멱등 키, 시계 차이뿐이다. 고른 좌석은 로그인하러 갔다 와도 남게 회차별로 `sessionStorage`에 둔다.
+- 변이 뒤 무효로 할 키: 선점 → `seatMap`·`myPerformance`, 주문 생성 → `myPerformance`·`orders`, 결제 → `order`, 취소 → `order`·`seatMap`·`myPerformance`·`orders`, 환불 다시 시도 → 관리자 환불 실패 목록·판매 현황. 결제 확정과 만료는 서버(웹훅·정리 작업)가 바꾸므로, 주문 폴링으로 pending이 paid나 cancelled로 바뀌면 그 회차의 `seatMap`·`myPerformance`와 `orders`를 무효로 한다.
+- 조회는 4xx면 다시 하지 않는다(5xx와 네트워크 오류만 한 번). 변이는 TanStack의 `retry`를 끈다(선점은 멱등이 아니다). 멱등 키가 있는 요청의 재시도는 아래 규칙대로 변이 함수 안에서 직접 한다.
+- 로그인·가입에 성공하면 `["me"]`를 뺀 쿼리를 지우고 `["me"]`에 응답을 넣은 뒤 `next`로 간다. 로그아웃하면 공개 화면으로 간 뒤 `["me"]`를 null로 하고 나머지 쿼리, `sessionStorage`의 멱등 키와 고른 좌석을 지운다(다른 사용자의 주문이 남아 보이지 않게).
 
-**시계.** `serverTime`이 있는 응답을 받을 때마다 `차이 = serverTime − 받은 순간의 Date.now()`를 고친다. 타이머와 판매 시작·종료 카운트다운은 `Date.now() + 차이`로 센다. 왕복 시간만큼 틀릴 수 있지만 버튼을 켜고 끄는 판단은 서버가 다시 한다.
+**시계.** 차이는 API 클라이언트가 응답을 받는 자리에서만 고친다(캐시의 값으로는 고치지 않는다). `차이 = serverTime − (보낸 시각 + 받은 시각) / 2`다. 새 표본은 왕복 시간이 지금 표본보다 짧거나 지금 표본이 1분보다 오래됐을 때만 받는다(판매 시작 순간의 느린 응답이 시계를 늦추지 않게, 1초 폴링이 타이머를 흔들지 않게). `Idempotent-Replayed: true`인 응답은 쓰지 않는다(처음 응답의 옛 serverTime이다). 타이머와 판매 시작·종료 카운트다운은 `Date.now() + 차이`로 센다. 버튼을 켜고 끄는 판단은 서버가 다시 한다. 공연 목록에는 serverTime이 없어, 판매 예정·판매 중·마감 표시는 차이가 있으면 그것으로, 없으면 PC 시계로 대강 보인다(지난 회차는 "종료").
+
+**다시 보낸 응답.** `Idempotent-Replayed: true`이면 본문을 캐시에 넣지 않고 그 주문을 다시 읽는다(10장 37).
+
+**멱등 키.** 6.2 "멱등 키의 수명"을 이렇게 둔다.
+- 키는 `sessionStorage`에 **보내기 전에** 쓴다. 이름은 `idem:createOrder:<holdId>`, `idem:pay:<orderId>`이고 값은 `{ key, body, attempt }`다.
+- 같은 시도의 재시도(네트워크 오류, 503, `REQUEST_IN_PROGRESS`)는 저장한 본문을 그대로 보낸다(request_hash가 같아야 한다). 재시도하는 동안 결제 상황 고르기를 잠근다. 재시도는 `Retry-After` 뒤 세 번까지이고, 그 뒤로는 주문 폴링에 맡긴다.
+- 저장된 키가 없으면(다른 탭) 새 키로 보낸다. 중복은 `ORDER_EXISTS`와 `PAYMENT_IN_PROGRESS`가 막는다. "다시 결제"는 attempt를 올린 새 키다.
 
 **선점 → 주문.**
-1. 좌석 지도에서 `available`이고 가격이 있는 좌석을 고른다. 고를 수 있는 수는 `/me`의 `remaining`이다(로그인 전에는 4). 판매 기간 밖이면 고를 수 없고, "예매 오픈까지 남은 시간"이나 "예매 마감"을 보인다.
-2. "선점하기"는 `POST /performances/:id/holds` 다음 곧바로 `POST /holds/:id/orders`(새 멱등 키를 holdId로 `sessionStorage`에 둔다)를 보내고 주문 화면으로 간다. 로그인 전이면 로그인 화면에 갔다가 돌아온다.
-3. 둘 사이에서 끊기면(새로고침, 네트워크) 선점만 남는다. 좌석 지도는 `/me`에서 주문이 없는 선점(`orderId: null`)을 찾아 "주문 이어서 만들기"를 보인다(저장해 둔 같은 키로 보낸다).
-4. 409는 code마다 다르게 보인다. `SEAT_UNAVAILABLE`·`PRICE_MISSING`이면 좌석 지도를 다시 읽고 그 좌석을 빼며 알린다. `HOLD_LIMIT`이면 쥔 좌석·산 좌석과 남은 수를 보인다. `SALES_CLOSED`는 NOT_OPEN이면 카운트다운, CLOSED면 마감이다.
+1. 좌석 지도는 `available`이고 가격이 있는 좌석만 고르게 한다. 고를 수 있는 수는 `/me`의 `remaining`이다(로그인 전에는 `SEAT_LIMIT_PER_USER`). 판매 기간 밖이면 고를 수 없고 "예매 오픈까지 남은 시간"이나 "예매 마감"을 보인다.
+2. 지도를 읽을 때마다 고른 좌석 중 available이 아니거나 가격이 없는 좌석을 빼고 "n석이 이미 선점되었습니다"를 알린다. 고른 수가 `remaining`보다 많으면 선점하기를 끄고 문구를 보인다(무엇을 뺄지는 사용자가 고른다). 판매 중에는 지도를 15초마다, 창으로 돌아올 때, 409 뒤에 다시 읽는다(6단계 부하 모델에 넣는다). 카운트다운이 0이 되거나 로그인에서 돌아와도 자동으로 선점하지 않는다.
+3. "선점하기"는 `POST /performances/:id/holds` 다음 곧바로 `POST /holds/:id/orders`를 보내고 주문 화면으로 간다. 로그인 전이면 로그인 화면에 갔다가 돌아온다.
+4. 좌석 지도는 `/me`의 선점 좌석을 "내 선점"으로 따로 그린다(`held`와 다른 무늬와 글자). `/me`에 유효한 선점이 있으면 지도 위에 띠를 둔다: 주문이 없으면 "주문 이어서 만들기"(저장한 키로), 있으면 "결제 이어서 하기(남은 시간)". 선점과 주문 생성 사이에서 끊겼거나 뒤로 가기로 돌아온 경우다.
+5. 선점이 네트워크 오류·5xx·`SEAT_UNAVAILABLE`·`HOLD_LIMIT`로 끝나면 먼저 `["myPerformance", id]`를 다시 읽는다. 선점은 멱등 키가 없어, 응답을 잃고 다시 누르거나 두 탭에서 고르면 내가 쥔 좌석으로 409를 받는다. 실패한 좌석이 모두 내 유효한 선점 안에 있으면 "이미 선점한 좌석입니다"를 보이고 그 선점으로 간다. 아니면 지도를 다시 읽고 그 좌석을 빼며 "다른 사람이 먼저 선점했습니다"를 알린다(`classifyHoldFailure`, 세 경우를 테스트한다).
+6. 그 밖의 409: `PRICE_MISSING`이면 그 좌석을 빼고 알린다. `HOLD_LIMIT`(내 선점이 아니면)은 쥔 좌석·산 좌석과 남은 수를 보인다. `SALES_CLOSED`는 NOT_OPEN이면 카운트다운, CLOSED면 마감이다.
 
-**주문 화면.** `GET /orders/:id`를 보인다. 6.2 "주문과 결제의 조합 → 화면" 표를 순수 함수 하나(주문 → 화면 상태)로 만들고, 표의 줄마다 단위 테스트를 둔다.
-- 남은 시간은 결제 마감(`payBy`)까지다. `payBy`가 지나면 결제 버튼을 끄고, `holdExpiresAt`이 지나면 주문을 다시 읽어 서버가 주는 상태를 보인다(서버는 정리 작업 전이라도 cancelled(expired)로 준다). 화면이 혼자 "만료"를 정하지 않는다.
-- 결제는 가짜 결제사의 상황을 고른다(성공·실패·중복·순서 뒤바뀜·먼저 옴·유실, 기본은 성공, "데모"라고 적는다). 202 뒤에는 마지막 결제가 requested인 동안 주문을 1초마다 다시 읽는다. 503 `PAYMENT_PROVIDER_UNAVAILABLE`과 409 `REQUEST_IN_PROGRESS`는 `Retry-After` 뒤 같은 키로 다시 보내고 "결제 확인 중"을 보인다. `PAYMENT_IN_PROGRESS`는 기다린다. "다시 결제"는 새 키다. 유실은 대사(30초)가 failed로 바꿀 때까지 "결제 확인 중"이므로 그 문구를 둔다.
-- "좌석 다시 선택"은 주문 취소다. 판매 종료(회차의 `salesCloseAt`) 뒤면 다시 선점할 수 없다고 확인받고, 결제 확인 중이면 "결제됐다면 자동 환불됩니다"를 확인받는다.
+**주문 화면의 상태.** 6.2 "주문과 결제의 조합 → 화면" 표를 순수 함수 하나로 만든다. `orderScreen(order, now) → { main, refunds }`이고 `order`는 `OrderView`에서 `status`·`cancelReason`·`amount`·`payBy`·`holdExpiresAt`·`payments`만 본다(내 예매도 같은 함수를 쓴다). main은 주문 상태, requested 결제가 있는지, now와 `payBy`의 관계로 정하고, refunds는 refund_* 결제마다 한 줄(금액·상태·시각)이다. 표의 줄마다, `payBy` 경계(−1ms와 그 시각)마다 단위 테스트를 둔다. 결제·취소가 409나 재시도 상한을 넘긴 503으로 끝나면 주문을 다시 읽어 이 함수로 그리고, 409의 reason은 문구에만 쓴다(503 뒤 늦은 재시도의 `ORDER_NOT_PAYABLE`이어도 결제가 requested로 남아 돈이 빠졌을 수 있다, 10장 48).
 
-**내 예매.** 새 API `GET /orders`(10장 41)를 쓴다. 내 주문 중 결제 대기(선점이 살아 있는 pending), paid, 결제가 붙은 cancelled를 최근 것부터 100개 준다. 회차 요약, 좌석 수, 금액, 그리고 주문 화면과 같은 함수로 상태를 고를 수 있게 마지막 결제 상태와 환불 중·완료 금액을 함께 준다. 결제 없이 끝난 주문(시간 초과, 취소)은 넣지 않는다. 자세한 것은 주문 화면에서 본다.
+**주문 화면.** `GET /orders/:id`를 보인다. 회차 정보와 판매 종료(`salesCloseAt`)는 `OrderView`에 일부러 없으므로(6.2) `["performances"]` 캐시에서 찾는다.
+- 남은 시간은 결제 마감(`payBy`)까지다. `payBy`가 지나면 결제 버튼을 끈다. 화면이 혼자 "만료"를 정하지 않는다. 서버는 선점이 지난 pending을 정리 작업 전이라도 cancelled(expired)로 준다.
+- 주문 조회의 다시 읽기 간격은 응답으로 정하는 함수(`orderRefetchInterval(order, now)`)다. requested 결제가 있으면 1초(15초가 지나면 5초), pending이고 `payBy`가 지났으면 상태가 바뀔 때까지 2초, 그 밖에는 멈춘다. 창이 가려지면 멈춘다. 새로고침·내 예매로 들어와도 같은 규칙이라 202를 본 적이 없어도 돈다. 대사가 결제사 장애로 멈춰도(10장 52) 5초 폴링에 머문다.
+- 결제는 가짜 결제사의 상황을 고른다(성공·실패·중복·순서 뒤바뀜·먼저 옴·유실, 기본은 성공, "데모"라고 적는다). 202의 status가 이미 succeeded(먼저 옴)나 failed(무효)면 곧바로 다시 읽는다. 503 `PAYMENT_PROVIDER_UNAVAILABLE`과 409 `REQUEST_IN_PROGRESS`는 위 재시도 규칙을 따르고 "결제 확인 중"을 보인다. `PAYMENT_IN_PROGRESS`는 기다린다. 유실은 대사(30초)가 failed로 바꿀 때까지 "결제 확인 중(최대 30초쯤)"이다.
+- "좌석 다시 선택"은 주문 취소다. 판매 종료 뒤면 다시 선점할 수 없다고 확인받고, 결제 확인 중이면 "결제됐다면 자동 환불됩니다"를 확인받는다.
 
-**로그인·가입.** 폼은 공유 `Credentials` 스키마로 먼저 검증한다. 401·409·429(`Retry-After` 초)·503을 문구로 바꾼다. 머리말에 로그인한 이메일과 로그아웃을 둔다.
+**내 예매.** 새 API `GET /orders`를 쓴다(10장 41, 70).
+- 응답은 `{ orders, hasMore, serverTime }`이다. 주문 하나는 `OrderView`의 `orderId`·`performanceId`·`status`·`cancelReason`·`amount`·`holdExpiresAt`·`payBy`·`payments`에 회차 요약(`performance`), 좌석 수, 만든 시각을 더한 것이다. 상태는 주문 조회처럼 보이는 상태다(선점이 지난 pending은 cancelled(expired), 그 규칙을 함수 하나로 빼 함께 쓴다).
+- 넣는 주문: 보이는 상태가 pending이나 paid인 주문, 그리고 cancelled이면서 failed가 아닌 결제(requested·refund_pending·refunded·refund_failed)가 하나라도 있는 주문이다. 결제 없이 끝났거나 failed만 붙은 주문은 넣지 않는다(돈이 움직이지 않았다).
+- 최근에 만든 것부터 100개를 한 스냅샷(repeatable read)에서 읽는다(따로 읽으면 pending 주문에 succeeded 결제가 붙어 보인다). `orders(user_id, created_at)` 인덱스를 더한다(사용자가 매번 여는 경로라 6단계로 미루지 않는다).
+
+**로그인·가입.** 비밀번호 규칙(NFKC 뒤 8~128자)을 `packages/shared`로 옮겨, 가입 폼과 API가 같은 함수로 검증한다(지금은 API에만 있다). 401·409·429(`Retry-After` 초)·503을 문구로 바꾼다. 머리말에 로그인한 이메일과 로그아웃을 둔다.
 
 **관리자.** `me`의 역할이 admin일 때만 메뉴를 보인다(권한은 서버가 지키고 화면의 숨김은 편의다).
 - 판매 현황: 회차를 골라 좌석·주문·매출·결제를 보인다.
 - 환불 실패: 목록과 다시 시도(`changed`로 "되돌렸다"와 "이미 환불 대기"를 나눈다).
-- 회차 등록 폼: 공연장을 고르면 등급별 가격 칸이 생긴다. 작품은 고르기와 새 제목 중 하나만 보낸다. 시각은 KST로 받아 `…:00+09:00`으로 보내고(6.2 끝의 "5단계 화면에서 지킬 것"), 판매 종료는 공연 3시간 전을 미리 채운다. 422 `problems`는 칸에 붙이고, 409는 그 회차로 가는 링크를 보인다. 시각 변환(`kstLocalToIso`, `formatKst`)은 단위 테스트를 둔다.
+- 회차 등록 폼: 공연장을 고르면 등급별 가격 칸이 생긴다. 작품은 고르기와 새 제목 중 하나만 보낸다(422 `SHOW_TITLE_EXISTS`면 "있는 작품으로 바꾸기"). 시각은 KST로 받아 `…:00+09:00`으로 보내고(6.2 끝의 "5단계 화면에서 지킬 것"), 판매 종료는 관리자가 그 칸을 고치기 전까지 공연 3시간 전을 따라간다. 422 `problems`는 칸에 붙이고, 409는 그 회차로 가는 링크를 보인다. `kstLocalToIso`·`formatKst`·판매 종료 기본값은 단위 테스트를 둔다.
 
-**좌석 지도의 접근성.** 좌석은 `button`이다(`aria-pressed`, `aria-label`에 구역·열·번호·등급·가격·상태). 팔린 좌석과 선점된 좌석은 `disabled`다. 상태를 색만으로 나누지 않고 무늬·글자와 범례로도 나눈다. 구역·열 순서는 좌석 지도 응답의 순서(좌석 id)를 따른다. 키보드로 고를 수 있고, 고른 좌석 목록과 합계를 함께 보인다.
+**좌석 지도의 접근성.**
+- 좌석은 `button`이다(`aria-pressed`, `aria-label`에 구역·열·번호·등급·가격·상태). 상태는 "선택 가능·선택함·내 선점·선점됨·판매됨·가격 미정" 중 하나다. 고를 수 없는 좌석은 `disabled`가 아니라 `aria-disabled="true"`다(탭이 건너뛰지 않고 위치를 읽을 수 있게).
+- 좌석은 열마다 `role="group"`(aria-label "1층 A열")으로 묶는다. 지도 안의 탭 정지점은 하나이고(roving tabindex) 화살표로 옮겨 다닌다. 구역·열 순서는 좌석 지도 응답의 순서(좌석 id)를 따른다.
+- 상태를 색만으로 나누지 않고 무늬·글자와 범례로도 나눈다. 고른 좌석 목록과 합계를 함께 보인다.
+- 좌석이 빠지거나 409가 나면 `aria-live="polite"`에 한 줄을 넣는다. 남은 시간은 1분·30초·결제 마감 때만 알린다(매초 읽지 않게).
 
-**개발 시드.** 샘플 시드의 날짜가 고정이라 지금(10월)은 판매 중인 회차가 없다. `db:seed`는 날짜를 하루 단위로 옮겨 가장 이른 판매 시작이 어제가 되게 넣는다(시각은 그대로라 "전일 17시"가 유지된다). 테스트와 `readSeedFile`은 원래 날짜를 쓴다.
+**단위 테스트로 지킬 순수 함수.** `orderScreen`, `orderRefetchInterval`, 시계(`updateClock`: 다시 보낸 응답·느린 표본을 버린다), `classifyHoldFailure`, 고른 좌석 맞추기, API 오류 → 할 일, 멱등 키 저장소, `kstLocalToIso`·`formatKst`·판매 종료 기본값, 시드 날짜 옮기기. 컴포넌트 테스트는 API 클라이언트를 가짜로 바꿔 409 code별 문구, "결제 확인 중", 좌석 지도의 키보드(화살표, `aria-pressed`, `aria-disabled` 좌석의 Enter 무시)를 본다. 타이머는 가짜 시계로 센다.
 
-**E2E.** Playwright 한 시나리오다: 가입 → 공연 → 좌석 둘 선점 → 주문 → 결제(성공) → 결제 완료 → 내 예매에 있음.
-- 다른 DB(`seat_booking_e2e`)와 다른 포트(API 3101, 화면 5174)를 써서 개발 서버와 겹치지 않는다.
-- Playwright는 `globalSetup`보다 `webServer`를 먼저 띄우므로, DB 만들기·마이그레이션·시드는 API를 띄우는 명령 안에서 한다.
-- API에는 `DATABASE_URL`·`PORT`·`APP_ORIGIN=http://localhost:5174`·`COOKIE_SECURE=false`를 명령줄로 넘긴다. `--env-file`은 이미 있는 환경 변수를 덮지 않아 사용자 `.env`가 섞이지 않는다.
-- `npm test`에 넣지 않고 `test:e2e`로 따로 둔다. CI에는 job을 따로 둔다(Postgres 서비스, `playwright install --with-deps chromium`). 기존 job에는 화면 typecheck·단위 테스트·`vite build`를 더한다.
+**개발 시드.** 샘플 시드의 날짜가 고정이라 지금(10월)은 판매 중인 회차가 없다. `shiftSeed(data, now)`는 모든 시각을 하루(86,400,000ms)의 배수만큼 옮겨 가장 이른 판매 시작이 지난 24시간 안에 오게 한다(`k = floor((가장 이른 판매 시작 − now) / 하루) + 1`일을 뺀다). KST에는 일광 절약 시간이 없어 벽시계 시각("전일 17시")이 그대로이고, 모든 시각을 같은 만큼 옮기므로 판매 기간 CHECK와 0006이 지켜진다. `db:seed`와 E2E가 이것을 쓰고, API 테스트와 `readSeedFile`은 원래 날짜를 쓴다. 재시드는 `restart identity`를 하지 않는다(주문·결제 id가 1부터 다시 시작하면 켜 둔 API의 가짜 결제사 메모리와 탭의 멱등 키가 옛 id와 겹친다). 옮긴 시드는 약 4주 뒤 판매가 끝나므로 다시 돌린다.
 
-**PR 순서.** 설계 → `GET /orders`와 시드 날짜 옮기기 → 화면 뼈대(Vite·라우터·쿼리·API 클라이언트·시계·CI) → 로그인·가입·공연 목록·좌석 지도·선점 → 주문 화면(타이머·결제·취소)·내 예매 → 관리자 → E2E와 CI job → 기록.
+**E2E.** Playwright 한 시나리오다: 가입(시도마다 새 이메일) → 공연 → 좌석 지도에서 처음 나오는 고를 수 있는 좌석 둘 → 선점 → 주문 → 결제(성공) → 결제 완료(이 단언만 15초) → 내 예매에 있음.
+- 다른 DB(`seat_booking_e2e`)와 다른 포트(API 3101, 화면 5174)를 쓴다. 브라우저 쪽 주소는 baseURL·`APP_ORIGIN`·Vite 모두 `http://127.0.0.1:5174` 하나로 맞춘다(localhost를 IPv4·IPv6 중 어디로 푸는지가 도구마다 달라 섞지 않는다).
+- webServer는 API, 화면 순서다. Playwright는 webServer를 `globalSetup`보다 먼저 띄우므로 DB 준비(지우기·만들기·마이그레이션·옮긴 시드)는 API를 띄우는 명령 안에서 한다. 준비 명령은 대상 DB 이름을 스스로 정한다(`seat_booking_e2e`만 받는다. 개발 DB를 지우지 않게). 테스트 DB 지우기의 42501 재시도를 다시 쓴다.
+- API 환경은 `webServer.env`로 API가 읽는 키 여덟 개를 모두 준다: `DATABASE_URL`(e2e), `PORT=3101`, `HOST=127.0.0.1`, `APP_ORIGIN=http://127.0.0.1:5174`, `COOKIE_SECURE=false`, `AUTH_RATE_LIMIT_PER_MINUTE=10`, `TRUST_PROXY=""`, `FAKE_PAY_SECRET=""`. 명령줄 `VAR=x`는 Windows cmd에서 안 되고, `--env-file`은 넘기지 않은 키를 `.env`에서 채우므로 API는 `start` 스크립트가 아니라 `tsx src/main.ts`로 띄운다. 기본 DB 주소는 환경 변수, 없으면 `.env`에서 `DATABASE_URL` 하나만 읽는다(슈퍼유저 비밀번호를 webServer로 퍼뜨리지 않게).
+- `reuseExistingServer: false`다(밀려난 개발 서버에 붙어 개발 DB에 가입·결제하지 않게). `workers: 1`, CI에서는 `retries: 1`, `forbidOnly`, 실패 trace를 남긴다.
+- `npm test`에 넣지 않고 `test:e2e`로 따로 둔다. CI는 기존 job에 화면 build를 더하고(typecheck와 단위 테스트는 워크스페이스로 들어간다), E2E job을 따로 둔다(Postgres 서비스, 앱 role·DB 만들기, `playwright install --with-deps --only-shell chromium`, 실패하면 리포트를 올린다, 15분 제한). 브라우저는 캐시하지 않는다.
+
+**PR 순서.** 설계 → `GET /orders`(인덱스 0007)·비밀번호 규칙을 shared로·시드 날짜 옮기기 → 화면 뼈대(Vite·라우터·쿼리·API 클라이언트·시계·인증 오류·CI build) → 로그인·가입·공연 목록·좌석 지도·선점 → 주문 화면(상태 함수·폴링·결제·취소)·내 예매 → 관리자 → E2E와 CI job → 기록.
 
 ## 7. 폴더 구조
 
@@ -571,9 +613,14 @@ seat-booking/
 
 5단계에서 정한 것(2026-10-23, 사용자가 4단계 검토 뒤 같은 방식으로 진행하기로 함):
 
-67. 화면 스택은 React 19, Vite 8, TanStack Query 5, React Router 8, CSS Modules다. UI 라이브러리를 쓰지 않고 좌석 지도와 상태 문구를 직접 만든다. 버전은 나온 지 2주가 지난 것 중 최신이다(새로 나온 판의 공급망 위험을 피한다). (AI 판단)
-68. 서버 상태는 TanStack Query 캐시에만 두고 낙관적 갱신을 하지 않는다. 바꾼 뒤 관련 키를 다시 읽고, 로그인·로그아웃하면 캐시를 비운다. 화면 상태는 고른 좌석·결제 상황·멱등 키·시계 차이뿐이다. (AI 판단)
-69. 타이머는 서버 시각으로 맞춘 PC 시계로 센다. 만료는 화면이 정하지 않는다. 결제 마감이 지나면 결제 버튼을 끄고, 선점 만료가 지나면 주문을 다시 읽는다. (AI 판단)
-70. `GET /orders`는 결제 대기(선점이 살아 있는 pending)·paid·결제가 붙은 cancelled를 최근 것부터 100개 준다. 넘기기는 없다. 결제 없이 끝난 주문은 넣지 않는다. (AI 판단, 10장 41)
-71. 개발 시드(`db:seed`)는 날짜를 하루 단위로 옮겨 가장 이른 판매 시작이 어제가 되게 넣는다. 고정 날짜면 판매 중인 회차가 없어 화면을 쓸 수 없다. 시각은 그대로 둔다. (AI 판단)
-72. E2E는 하나다(가입 → 선점 → 결제 → 내 예매). 다른 DB와 포트를 쓰고, `npm test`와 CI의 기존 job에 넣지 않고 따로 돈다. (AI 판단)
+67. 화면 스택은 React 19, Vite 8, TanStack Query 5, React Router 8, CSS Modules다. UI 라이브러리를 쓰지 않고 좌석 지도와 상태 문구를 직접 만든다. 버전은 나온 지 2주가 지난 것 중 최신이다(새로 나온 판의 공급망 위험을 피한다. 루트에 이미 있던 vitest는 예외). jsdom은 이 PC의 Node 24.12를 받는 29.x다. (AI 판단, 실현성 리뷰 L1)
+68. 서버 상태는 TanStack Query 캐시에만 두고 낙관적 갱신을 하지 않는다. 변이마다 무효로 할 키를 정하고, 서버가 바꾸는 것(결제 확정, 만료)은 주문 폴링이 상태 변화를 보면 무효로 한다. 조회는 4xx를 다시 하지 않고 변이는 TanStack의 재시도를 끈다. 화면 상태는 고른 좌석·결제 상황·멱등 키·시계 차이뿐이다. (AI 판단, 화면 리뷰 M3·L1)
+69. 만료는 화면이 정하지 않는다. 결제 마감이 지나면 결제 버튼을 끄고, 주문의 다시 읽기 간격을 응답으로 정해(결제 확인 중 1초→5초, 마감 뒤 2초, 그 밖에는 멈춤) 서버가 주는 상태를 보인다. 6.2의 표는 `orderScreen(order, now)` 하나로 만들고 표에 빠진 조합(마감 뒤 pending, pending + 환불, paid + 환불 지연, 끝나지 않은 cancelled + requested)을 더했다. (AI 판단, 화면 리뷰 M2·M3)
+70. `GET /orders`는 보이는 상태가 pending·paid인 주문과, failed가 아닌 결제가 붙은 cancelled 주문을 최근 것부터 100개(`hasMore`) 한 스냅샷에서 준다. 주문 하나는 `OrderView`에서 상태 함수가 보는 필드와 회차 요약·좌석 수·만든 시각이다(주문 화면과 같은 함수를 쓴다). failed만 붙은 취소는 돈이 움직이지 않아 넣지 않는다. `orders(user_id, created_at)` 인덱스를 더한다. (AI 판단, 10장 41, 화면 리뷰 M4·실현성 리뷰 M1·M2)
+71. 개발 시드(`db:seed`)는 모든 시각을 하루의 배수만큼 옮겨 가장 이른 판매 시작이 지난 24시간 안에 오게 한다. 고정 날짜면 판매 중인 회차가 없어 화면을 쓸 수 없다. 재시드는 `restart identity`를 하지 않는다(켜 둔 API의 가짜 결제사 메모리·탭의 멱등 키와 id가 겹친다). (AI 판단, 실현성 리뷰 L2·M3)
+72. E2E는 하나다(가입 → 선점 → 결제 → 내 예매). 다른 DB(이름은 준비 명령이 정하고 그 밖은 거절)와 포트를 쓰고, 주소는 모두 `127.0.0.1`이다. API에는 `webServer.env`로 읽는 키 여덟 개를 모두 준다(명령줄 `VAR=x`는 Windows cmd에서 안 되고, `--env-file`은 넘기지 않은 키를 `.env`에서 채운다). `npm test`와 CI의 기존 job에 넣지 않고 따로 돈다. (AI 판단, 실현성 리뷰 H1·M4)
+73. 로그인 전에도 공연 목록과 좌석 지도를 쓴다. `GET /auth/me`의 401은 로그인 전이고, 다른 경로의 401은 세션 만료로 보아 캐시를 지우되 로그인을 요구하는 화면에서만 로그인 화면으로 보낸다. 가입·로그인 폼의 오류는 폼에 보인다. 403 `FORBIDDEN`이면 권한 없음을 보이고 내 정보를 다시 읽는다. 열린 리다이렉트를 막게 `next`는 `/`로 시작하고 `//`가 아닐 때만 받는다. (AI 판단, 화면 리뷰 H1·L2)
+74. 선점은 멱등 키가 없으므로, 선점이 실패하면(네트워크·5xx·`SEAT_UNAVAILABLE`·`HOLD_LIMIT`) 먼저 `/me`를 다시 읽어 실패한 좌석이 내 선점인지 본다. 내 것이면 그 선점으로 가고, 아니면 다른 사람이 가져갔다고 알린다. 좌석 지도는 내 선점을 따로 그리고 이어서 할 일(주문 만들기·결제)을 띠로 보인다. (AI 판단, 화면 리뷰 H2)
+75. 시계 차이는 API 클라이언트가 응답을 받을 때만, 왕복의 가운데로 잰다. 왕복이 더 짧거나 1분이 지난 표본만 받고, `Idempotent-Replayed` 응답은 버린다(처음 응답의 옛 시각이다). (AI 판단, 화면 리뷰 M1)
+76. 멱등 키는 보내기 전에 `sessionStorage`에 `{ key, body, attempt }`로 쓴다. 같은 시도의 재시도는 저장한 본문을 그대로, `Retry-After` 뒤 세 번까지 보내고 그 뒤로는 주문 폴링에 맡긴다. 키가 없으면(다른 탭) 새 키로 보내고 중복은 서버가 막는다. (AI 판단, 화면 리뷰 M5)
+77. 비밀번호 규칙(NFKC 뒤 8~128자)을 `packages/shared`로 옮겨 가입 폼과 API가 같은 함수로 검증한다. (AI 판단, 화면 리뷰 L5)
