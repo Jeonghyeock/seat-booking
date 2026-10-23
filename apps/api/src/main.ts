@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { buildApp } from "./app.js";
+import { startCleanupLoop } from "./cleanup.js";
+import { createDb } from "./db/client.js";
 import { createPool } from "./db/pool.js";
 import { FakePaymentProvider } from "./fake-pay.js";
 
@@ -17,7 +19,10 @@ const pool = createPool({ connectionString: databaseUrl });
 const app = buildApp(pool, { logger: true }, { paymentProvider });
 // 개발 서버에서는 웹훅을 delayMs 뒤 보내고, 받지 못하면 다시 보낸다.
 paymentProvider.useTimers(app.log);
+// 정리 작업(만료 선점 풀기, 주문 취소, 환불, 대사, 멱등 키 지우기)을 10초마다 돌린다.
+const stopCleanup = startCleanupLoop(createDb(pool), paymentProvider, app.log);
 app.addHook("onClose", async () => {
+  stopCleanup();
   await pool.end();
 });
 

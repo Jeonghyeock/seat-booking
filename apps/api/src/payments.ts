@@ -112,7 +112,7 @@ function notPayableReason(order: { status: string; holdExpired: boolean; pastPay
 }
 
 // 시간 안에 끝나지 않으면 실패로 본다. 늦게 끝나거나 실패한 원래 호출은 버린다(결제 행은 같은 키나 대사가 맞춘다).
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`결제사가 ${ms}ms 안에 답하지 않음`)), ms);
@@ -139,13 +139,18 @@ export function handleWebhook(db: Db, event: PaymentEvent, body: object, log: Lo
       .onConflictDoNothing()
       .returning({ eventId: paymentWebhooks.eventId });
     if (inserted.length === 0) return "duplicate";
-    const result = await applyEvent(tx, event, log);
+    const result = await applyPaymentResult(tx, event, log);
     await tx.update(paymentWebhooks).set({ result }).where(eq(paymentWebhooks.eventId, event.eventId));
     return result;
   });
 }
 
-async function applyEvent(tx: Tx, event: PaymentEvent, log: Logger): Promise<Exclude<WebhookResult, "duplicate">> {
+// 결제사가 알려 준 결과를 반영한다. 웹훅과 대사(정리 작업)가 같이 쓴다(DESIGN 6.2 정리 4). 부르는 쪽이 트랜잭션을 연다.
+export async function applyPaymentResult(
+  tx: Tx,
+  event: PaymentEvent,
+  log: Logger,
+): Promise<Exclude<WebhookResult, "duplicate">> {
   const [payment] = await tx
     .select({ orderId: payments.orderId, providerRef: payments.providerRef })
     .from(payments)
@@ -192,6 +197,19 @@ async function applyEvent(tx: Tx, event: PaymentEvent, log: Logger): Promise<Exc
   // 결제사는 끝 상태를 바꾸지 않는다고 약속한다. 성공한 결제에 온 실패는 맞지 않는 웹훅이다.
   log.warn({ event, status }, "웹훅: 끝난 결제에 실패가 옴");
   return "unmatched";
+}
+
+// 대사가 결제사에서 무효로 해 둔 결제(결제사가 모르는 결제)를 failed로 바꾼다. 실패 반영과 같이 주문 → 결제 순서로 잡는다.
+// 그사이 웹훅이 반영했으면(requested가 아님) 그대로 둔다.
+export async function failVoidedPayment(tx: Tx, paymentId: number) {
+  const [payment] = await tx.select({ orderId: payments.orderId }).from(payments).where(eq(payments.id, paymentId));
+  await tx.select({ id: orders.id }).from(orders).where(eq(orders.id, payment!.orderId)).for("no key update");
+  const changed = await tx
+    .update(payments)
+    .set({ status: "failed", updatedAt: sql`now()` })
+    .where(and(eq(payments.id, paymentId), eq(payments.status, "requested")))
+    .returning({ id: payments.id });
+  return changed.length > 0;
 }
 
 // 결제를 from 상태일 때만 to로 바꾼다. provider_ref가 비어 있으면 웹훅의 것으로 채운다(웹훅이 결제 요청의 응답보다 먼저 옴).
