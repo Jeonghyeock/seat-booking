@@ -32,17 +32,20 @@ export function mySeats(myPerformance: MyPerformance | null | undefined) {
   return bySeat;
 }
 
-// 좌석 지도를 읽을 때마다 고른 좌석을 맞춘다. 그사이 선점·판매됐거나 가격이 없어진 좌석은 뺀다.
+// 좌석 지도를 읽을 때마다 고른 좌석을 맞춘다. 그사이 선점·판매됐거나 가격이 없어진 좌석은 뺀다(dropped, 알린다).
+// 내 선점이 된 좌석(방금 선점했다)은 따로 뺀다(becameMine, "다른 사람이 가져갔다"고 알리지 않는다).
 export function reconcileSelection(selected: readonly number[], seats: readonly SeatMapSeat[], mine: ReadonlySet<number>) {
   const byId = new Map(seats.map((seat) => [seat.seatId, seat]));
   const kept: number[] = [];
   const dropped: number[] = [];
+  const becameMine: number[] = [];
   for (const seatId of selected) {
     const seat = byId.get(seatId);
-    if (seat && isSelectable(seat, mine)) kept.push(seatId);
+    if (mine.has(seatId)) becameMine.push(seatId);
+    else if (seat && isSelectable(seat, mine)) kept.push(seatId);
     else dropped.push(seatId);
   }
-  return { kept, dropped };
+  return { kept, dropped, becameMine };
 }
 
 // 선점이 실패했을 때(네트워크·5xx·SEAT_UNAVAILABLE·HOLD_LIMIT) /me를 다시 읽은 뒤 판단한다.

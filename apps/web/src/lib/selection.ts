@@ -22,12 +22,16 @@ function write(performanceId: number, seatIds: number[]) {
   }
 }
 
+// 바꾸는 함수는 값이나 "앞 값 → 새 값"을 받는다. await 뒤처럼 앞 값이 낡았을 수 있는 곳은 함수로 바꾼다.
 export function useSelection(performanceId: number) {
   const [selected, setSelected] = useState(() => read(performanceId));
   const update = useCallback(
-    (next: number[]) => {
-      write(performanceId, next);
-      setSelected(next);
+    (next: number[] | ((previous: number[]) => number[])) => {
+      setSelected((previous) => {
+        const value = typeof next === "function" ? next(previous) : next;
+        write(performanceId, value);
+        return value;
+      });
     },
     [performanceId],
   );

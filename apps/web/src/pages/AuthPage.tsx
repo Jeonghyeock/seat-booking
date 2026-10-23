@@ -6,6 +6,7 @@ import { ApiError, NetworkError } from "../api/client";
 import { login, signup } from "../api/endpoints";
 import { queryKeys, useMe } from "../api/queries";
 import { safeNext } from "../lib/navigation";
+import { usePageTitle } from "../lib/usePageTitle";
 import styles from "./AuthPage.module.css";
 
 type Mode = "login" | "signup";
@@ -67,6 +68,7 @@ export function AuthPage({ mode }: { mode: Mode }) {
   }
 
   const title = mode === "login" ? "로그인" : "가입";
+  usePageTitle(title);
   const other = mode === "login" ? { to: "/signup", label: "처음이면 가입하기" } : { to: "/login", label: "이미 가입했으면 로그인" };
 
   return (

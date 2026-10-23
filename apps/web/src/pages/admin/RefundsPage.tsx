@@ -5,10 +5,12 @@ import { adminKeys, getRefundFailed, retryRefund } from "../../api/admin";
 import { ApiError } from "../../api/client";
 import { LoadError, Loading } from "../../components/States";
 import { formatKst, formatWon } from "../../lib/time";
+import { usePageTitle } from "../../lib/usePageTitle";
 import styles from "./Admin.module.css";
 
 // 환불 실패 목록과 다시 시도(DESIGN 6.3 관리자 기능). 다시 시도는 refund_pending으로 되돌리고 다음 정리 작업이 환불한다.
 export function RefundsPage() {
+  usePageTitle("환불 실패");
   const queryClient = useQueryClient();
   const refunds = useQuery({ queryKey: adminKeys.refunds, queryFn: getRefundFailed });
   // 결제마다 마지막 결과 문구.

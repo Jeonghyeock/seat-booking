@@ -114,18 +114,20 @@
   font-weight: 700;
 }
 
-/* 내 선점: 사선 무늬 */
+/* 내 선점: 굵은 초록 테두리와 "내"(글자 칸은 단색이라 읽힌다) */
 .seat[data-state="mine"],
 .swatch[data-state="mine"] {
-  background: repeating-linear-gradient(45deg, var(--color-success) 0 4px, #e7f5ec 4px 8px);
-  border-color: var(--color-success);
+  background: #e7f5ec;
+  border: 3px solid #1f7a3f;
+  color: #0f3d20;
   font-weight: 700;
 }
 
+/* 다른 사람의 선점: 빗금 무늬(선택 가능과 바탕 대비가 낮아도 무늬로 나뉜다) */
 .seat[data-state="held"],
 .swatch[data-state="held"] {
-  background: #b7bdc7;
-  color: #3b414b;
+  background: repeating-linear-gradient(45deg, #8d95a3 0 3px, #d3d7de 3px 6px);
+  color: #2b3038;
 }
 
 .seat[data-state="sold"],

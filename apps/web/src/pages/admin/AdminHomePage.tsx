@@ -4,10 +4,12 @@ import { getPerformances } from "../../api/endpoints";
 import { queryKeys } from "../../api/queries";
 import { LoadError, Loading } from "../../components/States";
 import { formatKst } from "../../lib/time";
+import { usePageTitle } from "../../lib/usePageTitle";
 import styles from "./Admin.module.css";
 
 // 관리자 첫 화면: 회차 등록, 환불 실패, 회차별 판매 현황.
 export function AdminHomePage() {
+  usePageTitle("관리자");
   const performances = useQuery({ queryKey: queryKeys.performances, queryFn: getPerformances });
   return (
     <section className={styles.page}>

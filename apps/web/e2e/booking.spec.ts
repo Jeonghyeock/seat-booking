@@ -27,10 +27,16 @@ test("가입하고 좌석 둘을 선점해 결제하면 내 예매에 결제 완
 
   // 결제(가짜 결제사, 기본 상황은 성공). 웹훅은 1초 뒤 오고, 화면은 1초마다 주문을 다시 읽는다.
   await page.getByRole("button", { name: /결제하기$/ }).click();
-  await expect(page.getByText("예매가 완료되었습니다.")).toBeVisible({ timeout: 15_000 });
+  // 화면 읽기 프로그램용 알림 줄에도 같은 글이 있어 보이는 상태 글자를 고른다
+  await expect(page.locator("strong", { hasText: "예매가 완료되었습니다." })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText(/^표 \d+/)).toHaveCount(2);
 
   await page.getByRole("link", { name: "내 예매" }).click();
   await expect(page.getByRole("heading", { name: "내 예매" })).toBeVisible();
   await expect(page.getByText("예매 완료").first()).toBeVisible();
+
+  // 로그인이 필요한 화면에서 로그아웃해도 로그인 화면이 아니라 공연 목록에서 끝난다
+  await page.getByRole("button", { name: "로그아웃" }).click();
+  await expect(page.getByRole("link", { name: "로그인" })).toBeVisible();
+  await expect(page).toHaveURL(/\/$/);
 });

@@ -6,13 +6,21 @@ import { LoadError, Loading } from "../components/States";
 import { orderScreen, orderStatusLabel } from "../lib/orderScreen";
 import { formatKst, formatRemaining, formatWon } from "../lib/time";
 import { useNow } from "../lib/useNow";
+import { usePageTitle } from "../lib/usePageTitle";
 import styles from "./MyOrdersPage.module.css";
 
 // 내 예매(DESIGN 6.5 내 예매). 결제 대기·결제 완료·돈이 움직였을 수 있는 취소 주문을 최근 것부터 보인다.
 // 상태는 주문 화면과 같은 함수로 고른다. 자세한 것은 주문 화면에서 본다.
-export function MyOrdersPage() {
-  const orders = useQuery({ queryKey: queryKeys.orders, queryFn: getMyOrders });
+// 결제 대기 주문의 남은 시간. 1초마다 바뀌는 것은 이 작은 부분만 다시 그린다(목록 전체는 5초마다).
+function PayCountdown({ payBy }: { payBy: number }) {
   const now = useNow(1000);
+  return <> · {formatRemaining(payBy - now)} 남음</>;
+}
+
+export function MyOrdersPage() {
+  usePageTitle("내 예매");
+  const orders = useQuery({ queryKey: queryKeys.orders, queryFn: getMyOrders });
+  const now = useNow(5000);
 
   if (orders.isPending) return <Loading />;
   if (orders.isError) return <LoadError error={orders.error} onRetry={() => void orders.refetch()} />;
@@ -41,7 +49,7 @@ export function MyOrdersPage() {
                   </p>
                   <p className={styles.status}>
                     {orderStatusLabel(screen)}
-                    {screen.main.kind === "pay" && ` · ${formatRemaining(screen.main.payBy - now)} 남음`}
+                    {screen.main.kind === "pay" && <PayCountdown payBy={screen.main.payBy} />}
                   </p>
                 </div>
                 <Link to={`/orders/${o.orderId}`} className={styles.action}>

@@ -10,6 +10,7 @@ import { serverNow } from "../lib/clock";
 import { type OrderMain, orderRefetchInterval, orderScreen, type RefundLine } from "../lib/orderScreen";
 import { formatKst, formatRemaining, formatWon } from "../lib/time";
 import { useNow } from "../lib/useNow";
+import { usePageTitle } from "../lib/usePageTitle";
 import styles from "./OrderPage.module.css";
 
 // 가짜 결제사의 상황(데모). 기본은 성공이다.
@@ -29,6 +30,14 @@ const NOT_PAYABLE: Record<string, string> = {
   TOO_CLOSE_TO_EXPIRY: "결제 마감 시간이 지났습니다.",
 };
 
+const MAIN_TEXT: Record<OrderMain["kind"], string> = {
+  pay: "결제할 수 있습니다.",
+  payClosed: "결제 마감 시간이 지났습니다. 좌석을 다시 골라 주세요.",
+  confirming: "결제를 확인하고 있습니다. 결과가 늦으면 30초쯤 걸릴 수 있습니다.",
+  paid: "예매가 완료되었습니다.",
+  cancelled: "주문이 취소되었습니다.",
+};
+
 function refundText(line: RefundLine, main: OrderMain) {
   // 결제가 끝난 주문의 환불은 중복 결제, 결제 대기 주문의 환불은 앞 결제다(DESIGN 6.2 표).
   const what = main.kind === "paid" ? "중복 결제" : main.kind === "pay" || main.kind === "payClosed" ? "앞 결제" : "결제";
@@ -38,13 +47,37 @@ function refundText(line: RefundLine, main: OrderMain) {
   return `${what} ${amount} 환불이 늦어지고 있습니다. 문의해 주세요.`;
 }
 
+// 화면 읽기 프로그램에 알릴 한 줄(DESIGN 6.5 좌석 지도의 접근성). 매초 바뀌는 남은 시간은 읽히지 않게 하고,
+// 상태가 바뀔 때와 결제 마감 1분·30초 전에만 알린다.
+function useOrderAnnouncement(main: OrderMain | undefined, now: number) {
+  const [text, setText] = useState("");
+  const previousKind = useRef<OrderMain["kind"] | undefined>(undefined);
+  const announcedMark = useRef<number | null>(null);
+  const kind = main?.kind;
+  const secondsLeft = main?.kind === "pay" ? Math.ceil((main.payBy - now) / 1000) : null;
+  const mark = secondsLeft === null ? null : secondsLeft <= 30 ? 30 : secondsLeft <= 60 ? 60 : null;
+  useEffect(() => {
+    if (kind === undefined) return;
+    if (previousKind.current !== undefined && previousKind.current !== kind) setText(MAIN_TEXT[kind]);
+    previousKind.current = kind;
+  }, [kind]);
+  useEffect(() => {
+    if (mark !== null && announcedMark.current !== mark) setText(mark === 60 ? "결제 마감까지 1분 남았습니다." : "결제 마감까지 30초 남았습니다.");
+    announcedMark.current = mark;
+  }, [mark]);
+  return text;
+}
+
 export function OrderPage({ orderId }: { orderId: number }) {
+  usePageTitle(`주문 ${orderId}`);
   const queryClient = useQueryClient();
   const now = useNow(1000);
   const scenarioName = useId();
   const [scenario, setScenario] = useState<PaymentScenario>("success");
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const cancelTrigger = useRef<HTMLButtonElement>(null);
+  const cancelQuestion = useRef<HTMLParagraphElement>(null);
 
   const order = useQuery({
     queryKey: queryKeys.order(orderId),
@@ -53,6 +86,8 @@ export function OrderPage({ orderId }: { orderId: number }) {
   });
   // 회차 정보와 판매 종료는 OrderView에 일부러 없다(DESIGN 6.2). 공연 목록 캐시에서 찾는다.
   const performances = useQuery({ queryKey: queryKeys.performances, queryFn: getPerformances });
+  const screen = order.data ? orderScreen(order.data, now) : undefined;
+  const announcement = useOrderAnnouncement(screen?.main, now);
 
   // 결제 확정·만료는 서버(웹훅, 정리 작업)가 바꾼다. 폴링으로 상태가 바뀌면 그 회차의 좌석 지도·내 선점과 내 예매를 다시 읽게 한다.
   const previousStatus = useRef<OrderView["status"] | undefined>(undefined);
@@ -63,6 +98,14 @@ export function OrderPage({ orderId }: { orderId: number }) {
     previousStatus.current = data.status;
   }, [order.data]);
 
+  // 취소 확인을 열면 질문으로, 닫으면 다시 열었던 버튼으로 포커스를 옮긴다.
+  const wasConfirming = useRef(false);
+  useEffect(() => {
+    if (confirmingCancel) cancelQuestion.current?.focus();
+    else if (wasConfirming.current) cancelTrigger.current?.focus();
+    wasConfirming.current = confirmingCancel;
+  }, [confirmingCancel]);
+
   function invalidateAround(performanceId: number) {
     void queryClient.invalidateQueries({ queryKey: queryKeys.seatMap(performanceId) });
     void queryClient.invalidateQueries({ queryKey: queryKeys.myPerformance(performanceId) });
@@ -71,8 +114,10 @@ export function OrderPage({ orderId }: { orderId: number }) {
   const refetchOrder = () => queryClient.invalidateQueries({ queryKey: queryKeys.order(orderId) });
 
   // "결제하기"는 누를 때마다 새 시도(새 키)다. 같은 시도의 재시도(503, REQUEST_IN_PROGRESS, 끊김)는 저장한 키·본문 그대로다.
+  // 다시 보낼 때마다 주문을 다시 읽는다. 결제 행은 이미 requested라 화면은 "결제 확인 중"이 된다.
   const pay = useMutation({
-    mutationFn: () => requestPayment(orderId, { scenario, delayMs: 1000 }, { newAttempt: true }),
+    mutationFn: () =>
+      requestPayment(orderId, { scenario, delayMs: 1000 }, { newAttempt: true, onRetry: () => void refetchOrder() }),
     onMutate: () => setNotice(null),
     onSuccess: () => void refetchOrder(),
     onError: (error) => {
@@ -122,7 +167,7 @@ export function OrderPage({ orderId }: { orderId: number }) {
   if (order.isError) return <LoadError error={order.error} onRetry={() => void order.refetch()} />;
 
   const view = order.data;
-  const { main, refunds } = orderScreen(view, now);
+  const { main, refunds } = screen!;
   const performance = performances.data?.performances.find((p) => p.id === view.performanceId);
   const salesClosed = performance ? Date.parse(performance.salesCloseAt) <= now : false;
   const canCancel = main.kind === "pay" || main.kind === "payClosed" || (main.kind === "confirming" && !main.cancelled);
@@ -138,22 +183,22 @@ export function OrderPage({ orderId }: { orderId: number }) {
         )}
       </header>
 
-      <div className={styles.status} data-kind={main.kind} role="status" aria-live="polite">
+      <p className="visually-hidden" aria-live="polite">
+        {announcement}
+      </p>
+
+      <div className={styles.status} data-kind={main.kind}>
         {main.kind === "pay" && (
           <>
             <strong>결제 마감까지 {formatRemaining(main.payBy - now)}</strong>
             {main.lastFailed && <span>결제가 실패했습니다. 다시 시도해 주세요.</span>}
           </>
         )}
-        {main.kind === "payClosed" && <strong>결제 마감 시간이 지났습니다. 좌석을 다시 골라 주세요.</strong>}
+        {main.kind === "payClosed" && <strong>{MAIN_TEXT.payClosed}</strong>}
         {main.kind === "confirming" && (
-          <strong>
-            {main.cancelled
-              ? "결제 결과를 확인하고 있습니다. 결제됐다면 자동으로 환불됩니다."
-              : "결제를 확인하고 있습니다. 웹훅이 사라진 경우 30초쯤 걸릴 수 있습니다."}
-          </strong>
+          <strong>{main.cancelled ? "결제 결과를 확인하고 있습니다. 결제됐다면 자동으로 환불됩니다." : MAIN_TEXT.confirming}</strong>
         )}
-        {main.kind === "paid" && <strong>예매가 완료되었습니다.</strong>}
+        {main.kind === "paid" && <strong>{MAIN_TEXT.paid}</strong>}
         {main.kind === "cancelled" && (
           <>
             <strong>{main.reason === "expired" ? "시간이 초과되어 주문이 취소되었습니다." : "주문을 취소했습니다."}</strong>
@@ -247,12 +292,16 @@ export function OrderPage({ orderId }: { orderId: number }) {
         </form>
       )}
 
-      {notice && <p className={styles.notice}>{notice}</p>}
+      {notice && (
+        <p className={styles.notice} role="alert">
+          {notice}
+        </p>
+      )}
 
       {canCancel &&
         (confirmingCancel ? (
-          <div className={styles.confirm} role="alertdialog" aria-labelledby="cancel-question">
-            <p id="cancel-question">
+          <div className={styles.confirm} role="group" aria-labelledby="cancel-question">
+            <p id="cancel-question" ref={cancelQuestion} tabIndex={-1}>
               {main.kind === "confirming"
                 ? "결제를 확인하는 중입니다. 취소하면 결제됐더라도 자동으로 환불됩니다. 취소할까요?"
                 : salesClosed
@@ -260,14 +309,14 @@ export function OrderPage({ orderId }: { orderId: number }) {
                   : "주문을 취소하고 좌석을 다시 고를까요?"}
             </p>
             <button type="button" onClick={() => cancel.mutate()} disabled={cancel.isPending}>
-              취소하기
+              주문 취소하기
             </button>
             <button type="button" onClick={() => setConfirmingCancel(false)}>
-              돌아가기
+              그대로 두기
             </button>
           </div>
         ) : (
-          <button type="button" className={styles.secondary} onClick={() => setConfirmingCancel(true)}>
+          <button type="button" ref={cancelTrigger} className={styles.secondary} onClick={() => setConfirmingCancel(true)}>
             좌석 다시 선택(주문 취소)
           </button>
         ))}

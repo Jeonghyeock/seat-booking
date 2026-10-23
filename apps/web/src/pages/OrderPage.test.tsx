@@ -99,8 +99,10 @@ describe("주문 화면", () => {
     const user = userEvent.setup();
     renderOrder();
     await user.click(await screen.findByRole("button", { name: "240,000원 결제하기" }));
-    expect(await screen.findByText(/결제를 확인하고 있습니다/)).toBeTruthy();
-    expect(await screen.findByText("예매가 완료되었습니다.", {}, { timeout: 3000 })).toBeTruthy();
+    expect(await screen.findByText(/결제를 확인하고 있습니다/, { selector: "strong" })).toBeTruthy();
+    expect(await screen.findByText("예매가 완료되었습니다.", { selector: "strong" }, { timeout: 3000 })).toBeTruthy();
+    // 상태가 바뀌면 화면 읽기 프로그램에 한 줄로 알린다(남은 시간은 매초 읽지 않는다)
+    expect(document.querySelector("[aria-live=polite]")?.textContent).toBe("예매가 완료되었습니다.");
     expect(screen.getByText(/표 70/)).toBeTruthy();
 
     // 결제 요청은 멱등 키와 고른 상황을 보낸다
@@ -116,7 +118,11 @@ describe("주문 화면", () => {
     const user = userEvent.setup();
     renderOrder();
     await user.click(await screen.findByRole("button", { name: "좌석 다시 선택(주문 취소)" }));
-    await waitFor(() => expect(screen.getByRole("alertdialog").textContent).toMatch(/다시 선점할 수 없습니다/));
+    const question = await screen.findByText(/다시 선점할 수 없습니다/);
+    // 확인을 열면 질문으로, 그대로 두면 다시 연 버튼으로 포커스가 간다
+    await waitFor(() => expect(document.activeElement).toBe(question));
+    await user.click(screen.getByRole("button", { name: "그대로 두기" }));
+    await waitFor(() => expect(document.activeElement?.textContent).toBe("좌석 다시 선택(주문 취소)"));
   });
 
   it("시간이 초과된 주문은 좌석 다시 고르기로 간다(서버가 cancelled(expired)를 준다)", async () => {
