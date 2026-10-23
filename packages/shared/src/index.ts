@@ -16,6 +16,8 @@ export const PerformanceSummary = z.object({
   venueName: z.string(),
   startsAt: z.iso.datetime({ offset: true }),
   salesOpenAt: z.iso.datetime({ offset: true }),
+  // 온라인 판매를 닫는 시각. 회차마다 다르다. 이 시각부터 새 선점을 받지 않는다.
+  salesCloseAt: z.iso.datetime({ offset: true }),
 });
 export type PerformanceSummary = z.infer<typeof PerformanceSummary>;
 
@@ -58,7 +60,12 @@ export const SeatMapSeat = z.object({
 });
 export type SeatMapSeat = z.infer<typeof SeatMapSeat>;
 
-export const SeatMap = z.object({ performance: PerformanceSummary, seats: z.array(SeatMapSeat) });
+// serverTime은 DB의 now()다. 화면은 PC 시계와의 차이를 보정해 판매 시작·종료까지를 센다. 좌석 지도는 로그인 전에도 본다.
+export const SeatMap = z.object({
+  performance: PerformanceSummary,
+  seats: z.array(SeatMapSeat),
+  serverTime: z.iso.datetime({ offset: true }),
+});
 export type SeatMap = z.infer<typeof SeatMap>;
 
 // 1인 좌석 한도(회차당, DESIGN 10장 3). 요청 하나에 담을 수 있는 좌석 수도 같다.
@@ -110,7 +117,7 @@ export type MyPerformance = z.infer<typeof MyPerformance>;
 const PriceMissing = z.object({ error: z.string(), code: z.literal("PRICE_MISSING"), seatIds: SeatIds });
 
 // 409의 이유와, 화면이 다음 행동을 정할 값(DESIGN 6.2 "화면이 받는 것"). code로 가른다.
-// SALES_CLOSED: 판매 기간이 아니다. NOT_OPEN이면 serverTime으로 시계를 맞춰 salesOpenAt까지 센다.
+// SALES_CLOSED: 판매 기간이 아니다. NOT_OPEN이면 serverTime으로 시계를 맞춰 salesOpenAt까지 센다. CLOSED면 판매 종료(salesCloseAt) 뒤다.
 // HOLD_LIMIT: 이 회차에 쥔 좌석·산 좌석과 합치면 1인 한도를 넘는다.
 // PRICE_MISSING: 담은 좌석 중 이 회차에 가격이 없는 좌석(seatIds)이 있다. 그 좌석을 빼고 다시 고른다.
 // SEAT_UNAVAILABLE: 담은 좌석 중 이미 선점·판매됐거나 이 회차의 좌석이 아닌 것(seatIds)이 있다.
@@ -120,6 +127,7 @@ export const HoldConflict = z.discriminatedUnion("code", [
     code: z.literal("SALES_CLOSED"),
     reason: z.enum(["NOT_OPEN", "CLOSED"]),
     salesOpenAt: z.iso.datetime({ offset: true }),
+    salesCloseAt: z.iso.datetime({ offset: true }),
     startsAt: z.iso.datetime({ offset: true }),
     serverTime: z.iso.datetime({ offset: true }),
   }),

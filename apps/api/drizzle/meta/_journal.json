@@ -29,6 +29,13 @@
       "when": 1792718451067,
       "tag": "0003_orders_payments",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1792736380884,
+      "tag": "0004_sales_close",
+      "breakpoints": true
     }
   ]
 }

@@ -9,7 +9,14 @@ export const HOLD_TTL_SECONDS = 5 * 60;
 export type HoldInput = { userId: number; performanceId: number; seatIds: number[] };
 // 409의 이유와, 화면이 다음 행동을 정할 값(DESIGN 6.2 "화면이 받는 것").
 export type HoldFailure =
-  | { code: "SALES_CLOSED"; reason: "NOT_OPEN" | "CLOSED"; salesOpenAt: Date; startsAt: Date; serverTime: Date }
+  | {
+      code: "SALES_CLOSED";
+      reason: "NOT_OPEN" | "CLOSED";
+      salesOpenAt: Date;
+      salesCloseAt: Date;
+      startsAt: Date;
+      serverTime: Date;
+    }
   | { code: "HOLD_LIMIT"; limit: number; heldSeats: number; purchasedSeats: number }
   | { code: "PRICE_MISSING"; seatIds: number[] }
   | { code: "SEAT_UNAVAILABLE"; seatIds: number[] };
@@ -38,10 +45,12 @@ export async function countLimitSeats(tx: Tx, userId: number, performanceId: num
 }
 
 // 트랜잭션 안에서 판매 기간·한도·가격을 확인하고 좌석을 선점한다. 실패하면 Rejected를 던져 트랜잭션을 되돌린다.
-// 1. 판매 기간(sales_open_at <= now() < starts_at)이 아니면 SALES_CLOSED. 앱 서버의 시계가 아니라 DB 시계로 SQL에서 판단한다.
+// 1. 판매 기간(sales_open_at <= now() < sales_close_at)이 아니면 SALES_CLOSED. 앱 서버의 시계가 아니라 DB 시계로 SQL에서 판단한다.
 // 2. 한도에 세는 좌석 수와 담은 좌석 수의 합이 1인 한도를 넘으면 HOLD_LIMIT.
 // 3. 담은 좌석 중 이 회차에 등급 가격이 없는 좌석이 있으면 PRICE_MISSING. 이 회차에 없는 좌석은 6에서 SEAT_UNAVAILABLE이 된다.
-// 4. 선점 행을 넣는다. 만료 시각은 DB 시계로 정하고, 공연 시작을 넘지 않는다.
+// 4. 선점 행을 넣는다. 만료 시각은 DB 시계로 정하고, 공연 시작을 넘지 않는다. 판매 종료로는 자르지 않는다.
+//    판매 종료는 새 선점만 막고, 그 전에 잡은 선점은 5분을 다 받아 만료까지 주문·결제할 수 있다(DESIGN 10장 54).
+//    판매 종료에서 자르면 판매 종료 30초 안에 잡은 선점은 결제 마감이 이미 지나 결제할 수 없다.
 // 5. 한 문장에서 좌석을 좌석 id 순서로 잠그고(locked), 빈 좌석이거나 만료된 선점인 좌석만 바꾼다.
 //    잠금 순서가 요청마다 같아서 여러 좌석을 잠가도 교착이 생기지 않는다.
 //    다른 요청이 쥔 좌석이면 그 트랜잭션이 끝날 때까지 기다린 뒤, 바뀐 행 값으로 조건을 다시 본다.
@@ -56,17 +65,18 @@ export async function countLimitSeats(tx: Tx, userId: number, performanceId: num
 // - 그 사이 만료된 선점이 아직 유효해 보여 HOLD_LIMIT이나 SEAT_UNAVAILABLE이 날 수 있다.
 // - 새 선점의 유지 시간이 그만큼 짧아진다. 공연 시작 직전이면 이미 지난 만료 시각(starts_at)의 선점을 받을 수 있다.
 //   그 좌석은 곧바로 다른 사람이 잡을 수 있고, 결제 확정은 만료를 statement_timestamp()로 보므로 팔리지 않는다(DESIGN 6.2).
-// - 판매가 열리는 순간이면 NOT_OPEN이 날 수 있다.
+// - 판매가 열리는 순간이면 NOT_OPEN이 날 수 있다. 판매가 닫히는 순간이면 닫힌 뒤에 선점이 커밋될 수 있다.
 // - 응답의 serverTime도 이 시각이라 실제보다 이르다(화면이 시계 차이를 보정하는 값, DESIGN 6.2).
 export async function holdWithinTx(tx: Tx, { userId, performanceId, seatIds }: HoldInput): Promise<HoldSuccess> {
   // tx.execute는 timestamptz를 문자열로 돌려주므로 쿼리 빌더로 읽는다. now()도 timestamptz 열의 변환으로 Date가 된다.
   const [performance] = await tx
     .select({
       salesOpenAt: performances.salesOpenAt,
+      salesCloseAt: performances.salesCloseAt,
       startsAt: performances.startsAt,
       serverTime: sql`now()`.mapWith(performances.startsAt),
       closed: sql<"NOT_OPEN" | "CLOSED" | null>`case when now() < ${performances.salesOpenAt} then 'NOT_OPEN'
-                                                     when now() >= ${performances.startsAt} then 'CLOSED' end`,
+                                                     when now() >= ${performances.salesCloseAt} then 'CLOSED' end`,
     })
     .from(performances)
     .where(eq(performances.id, performanceId));

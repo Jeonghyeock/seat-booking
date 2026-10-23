@@ -25,7 +25,13 @@ describe("공연 목록과 좌석 지도 API", () => {
     const body = PerformanceList.parse(res.json());
     const mine = body.performances.filter((p) => performanceIds.includes(p.id));
     expect(mine.map((p) => p.showTitle)).toEqual(["뮤지컬 〈샘플〉", "뮤지컬 〈샘플〉", "샘플 오케스트라 송년 음악회"]);
-    expect(mine[0]).toMatchObject({ venueName: "샘플 아트홀", startsAt: "2026-12-19T10:30:00.000Z" });
+    // 판매 종료는 회차마다 다르다(뮤지컬은 공연 전일 17시, 음악회는 공연 3시간 전)
+    expect(mine.map((p) => [p.startsAt, p.salesCloseAt])).toEqual([
+      ["2026-12-19T10:30:00.000Z", "2026-12-18T08:00:00.000Z"],
+      ["2026-12-20T05:00:00.000Z", "2026-12-19T08:00:00.000Z"],
+      ["2026-12-31T11:00:00.000Z", "2026-12-31T08:00:00.000Z"],
+    ]);
+    expect(mine[0]).toMatchObject({ venueName: "샘플 아트홀" });
   });
 
   it("GET /performances/:id/seats는 배치 순서대로 모든 좌석과 등급 가격, 상태를 돌려준다", async () => {
@@ -38,6 +44,8 @@ describe("공연 목록과 좌석 지도 API", () => {
     const prices = Object.fromEntries(body.seats.map((s) => [s.grade, s.price]));
     expect(prices).toEqual({ VIP: 150000, R: 120000, S: 90000 });
     expect(new Set(body.seats.map((s) => s.status))).toEqual(new Set(["available"]));
+    // 화면이 판매 시작·종료까지를 셀 서버 시각
+    expect(Math.abs(Date.parse(body.serverTime) - Date.now())).toBeLessThan(60_000);
   });
 
   it("없는 회차는 404, 10진수 양의 정수가 아닌 id는 400", async () => {

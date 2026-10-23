@@ -103,12 +103,12 @@ describe("POST /performances/:id/holds", () => {
     });
   });
 
-  it("판매가 열리기 전이나 공연이 시작한 뒤에는 409 SALES_CLOSED이고, 판단에 쓴 시각을 함께 준다", async () => {
+  it("판매가 열리기 전이나 판매 종료 뒤에는 409 SALES_CLOSED이고, 판단에 쓴 시각을 함께 준다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
     const [userId] = await newUsers(pool, 1);
 
     const opening = await pool.query(
-      "update performances set sales_open_at = now() + interval '1 hour' where id = $1 returning sales_open_at, starts_at",
+      "update performances set sales_open_at = now() + interval '1 hour' where id = $1 returning sales_open_at, sales_close_at, starts_at",
       [performanceId],
     );
     const notOpen = conflict(await hold(performanceId, userId, [seatIds[0]]));
@@ -116,29 +116,44 @@ describe("POST /performances/:id/holds", () => {
     expect(notOpen).toMatchObject({
       reason: "NOT_OPEN",
       salesOpenAt: opening.rows[0].sales_open_at.toISOString(),
+      salesCloseAt: opening.rows[0].sales_close_at.toISOString(),
       startsAt: opening.rows[0].starts_at.toISOString(),
     });
     expect(Date.parse(notOpen.serverTime)).toBeLessThan(Date.parse(notOpen.salesOpenAt));
 
-    // 판매 시작은 공연 시작보다 앞서야 한다(CHECK)
+    // 판매는 닫혔지만 공연은 아직 시작하지 않았다
     await pool.query(
-      "update performances set sales_open_at = now() - interval '2 hours', starts_at = now() - interval '1 hour' where id = $1",
+      "update performances set sales_open_at = now() - interval '2 hours', sales_close_at = now() - interval '1 hour' where id = $1",
       [performanceId],
     );
     const closed = conflict(await hold(performanceId, userId, [seatIds[0]]));
     if (closed.code !== "SALES_CLOSED") throw new Error(closed.code);
-    expect(closed.reason).toBe("CLOSED");
-    expect(Date.parse(closed.serverTime)).toBeGreaterThanOrEqual(Date.parse(closed.startsAt));
+    expect(closed).toMatchObject({ reason: "CLOSED", error: "예매가 마감되었습니다" });
+    expect(Date.parse(closed.serverTime)).toBeGreaterThanOrEqual(Date.parse(closed.salesCloseAt));
+    expect(Date.parse(closed.serverTime)).toBeLessThan(Date.parse(closed.startsAt));
 
     const { rows } = await pool.query("select count(*) as n from holds where user_id = $1", [userId]);
     expect(rows[0].n).toBe(0);
     expect((await statuses(performanceId)).get(seatIds[0]!)).toBe("available");
   });
 
-  it("공연 시작이 5분 안이면 선점은 공연 시작에 끝난다", async () => {
+  it("판매 종료 직전에 잡은 선점도 5분을 다 받는다(판매 종료로 자르지 않는다)", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
     const [userId] = await newUsers(pool, 1);
-    await pool.query("update performances set starts_at = now() + interval '2 minutes' where id = $1", [performanceId]);
+    await pool.query("update performances set sales_close_at = now() + interval '1 minute' where id = $1", [performanceId]);
+    const res = await hold(performanceId, userId, [seatIds[0]]);
+    expect(res.statusCode).toBe(201);
+    const body = HoldResponse.parse(res.json());
+    expect(Date.parse(body.expiresAt) - Date.parse(body.serverTime)).toBe(5 * 60_000);
+  });
+
+  it("공연 시작이 5분 안이면 선점은 공연 시작에 끝난다(판매 종료가 공연 시작과 같은 회차)", async () => {
+    const { performanceId, seatIds } = await newPerformance(pool);
+    const [userId] = await newUsers(pool, 1);
+    await pool.query(
+      "update performances set sales_close_at = now() + interval '2 minutes', starts_at = now() + interval '2 minutes' where id = $1",
+      [performanceId],
+    );
 
     const res = await hold(performanceId, userId, [seatIds[0], seatIds[1]]);
     expect(res.statusCode).toBe(201);

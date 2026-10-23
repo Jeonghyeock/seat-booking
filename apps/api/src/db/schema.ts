@@ -57,8 +57,17 @@ export const performances = pgTable(
       .references(() => venues.id),
     startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
     salesOpenAt: timestamp("sales_open_at", { withTimezone: true }).notNull(),
+    // 온라인 판매를 닫는 시각. 회차마다 운영자가 정한다(공연 전일 17시, 공연 3시간 전 등, DESIGN 10장 54).
+    // 새 선점만 막는다. 그 전에 잡은 선점은 만료까지 주문·결제할 수 있다.
+    salesCloseAt: timestamp("sales_close_at", { withTimezone: true }).notNull(),
   },
-  (t) => [check("performances_sales_before_start", sql`${t.salesOpenAt} < ${t.startsAt}`)],
+  // 판매 기간이 비어 있지 않고, 판매는 공연 시작 전에 닫힌다(같아도 된다).
+  (t) => [
+    check(
+      "performances_sales_window_valid",
+      sql`${t.salesOpenAt} < ${t.salesCloseAt} and ${t.salesCloseAt} <= ${t.startsAt}`,
+    ),
+  ],
 );
 
 // 회차별 등급 가격. 가격은 좌석마다가 아니라 등급마다 정해진다.

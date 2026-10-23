@@ -26,6 +26,7 @@ export const SeedData = z.object({
         z.object({
           startsAt: z.iso.datetime({ offset: true }),
           salesOpenAt: z.iso.datetime({ offset: true }),
+          salesCloseAt: z.iso.datetime({ offset: true }),
           prices: z.record(z.string(), z.number().int().nonnegative()),
         }),
       ),
@@ -77,7 +78,13 @@ export async function seedInto(tx: Tx, data: SeedData) {
     for (const p of show.performances) {
       const [perf] = await tx
         .insert(performances)
-        .values({ showId: s!.id, venueId, startsAt: new Date(p.startsAt), salesOpenAt: new Date(p.salesOpenAt) })
+        .values({
+          showId: s!.id,
+          venueId,
+          startsAt: new Date(p.startsAt),
+          salesOpenAt: new Date(p.salesOpenAt),
+          salesCloseAt: new Date(p.salesCloseAt),
+        })
         .returning({ id: performances.id });
       const performanceId = perf!.id;
       performanceIds.push(performanceId);

@@ -58,11 +58,11 @@ describe("샘플 시드", () => {
   });
 
   it("넣는 도중에 실패하면 앞서 넣은 공연장·좌석까지 되돌린다", async () => {
-    // 공연장과 좌석을 넣은 뒤, 회차를 넣을 때 check 제약(판매 시작 < 공연 시작)에 걸린다
+    // 공연장과 좌석을 넣은 뒤, 회차를 넣을 때 check 제약(판매 시작 < 판매 종료)에 걸린다
     const broken = structuredClone(data);
     broken.venue.name = "롤백 홀";
     const p = broken.shows[0]!.performances[0]!;
-    p.salesOpenAt = p.startsAt;
+    p.salesCloseAt = p.salesOpenAt;
     await expect(seed(db, broken)).rejects.toMatchObject({ cause: { code: "23514" } });
     expect(await venuesNamed("롤백 홀")).toBe(0);
   });
@@ -154,11 +154,17 @@ describe("제약 조건", () => {
     ).rejects.toMatchObject({ code: "23503", constraint: "holds_user_id_users_id_fk" });
   });
 
-  it("판매 시작은 공연 시작보다 앞서야 한다(23514)", async () => {
+  it("판매 기간은 비어 있지 않고 공연 시작 전에 닫힌다(23514). 판매 종료가 공연 시작과 같은 것은 된다", async () => {
     const { performanceIds } = await onePerformance();
-    await expect(
-      pool.query("update performances set sales_open_at = starts_at where id = $1", [performanceIds[0]]),
-    ).rejects.toMatchObject({ code: "23514" });
+    const setClose = (expr: string) =>
+      pool.query(`update performances set sales_close_at = ${expr} where id = $1`, [performanceIds[0]]);
+    for (const expr of ["sales_open_at", "starts_at + interval '1 second'"]) {
+      await expect(setClose(expr), expr).rejects.toMatchObject({
+        code: "23514",
+        constraint: "performances_sales_window_valid",
+      });
+    }
+    await expect(setClose("starts_at")).resolves.toMatchObject({ rowCount: 1 });
   });
 
   it("가격은 0 이상이어야 한다(23514)", async () => {
