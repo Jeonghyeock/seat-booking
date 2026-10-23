@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultSalesClose, formatKst, formatRemaining, formatWon, isoToKstLocal, kstLocalToIso } from "./time";
+import { defaultSalesClose, formatCountdown, formatKst, formatRemaining, formatWon, isoToKstLocal, kstLocalToIso } from "./time";
 
 describe("시각", () => {
   it("KST 입력값에 초와 +09:00을 붙여 보낸다. 형식이 틀리거나 없는 날짜는 null이다", () => {
@@ -30,5 +30,8 @@ describe("시각", () => {
     expect(formatRemaining(59_000)).toBe("0:59");
     expect(formatRemaining(-5)).toBe("0:00");
     expect(formatWon(150000)).toBe("150,000원");
+    expect(formatCountdown(3 * 86_400_000 + 4 * 3_600_000 + 5)).toBe("3일 4시간");
+    expect(formatCountdown(3_723_000)).toBe("1:02:03");
+    expect(formatCountdown(59_000)).toBe("0:59");
   });
 });

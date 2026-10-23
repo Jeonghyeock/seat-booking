@@ -1,10 +1,10 @@
-import { z } from "zod";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import { Link, NavLink, Outlet, useNavigate } from "react-router";
-import { apiRequest } from "../api/client";
+import { logout as logoutRequest } from "../api/endpoints";
 import { clearUserQueries, queryKeys, useMe } from "../api/queries";
 import { clearAttempts } from "../lib/idempotency";
+import { clearSelections } from "../lib/selection";
 import styles from "./Layout.module.css";
 
 export function Layout() {
@@ -23,13 +23,14 @@ export function Layout() {
   }, [me, queryClient]);
 
   const logout = useMutation({
-    mutationFn: () => apiRequest("/auth/logout", { method: "POST", schema: z.object({}) }),
+    mutationFn: logoutRequest,
     onSettled: () => {
       // 공개 화면으로 먼저 간 뒤 비운다(그려진 주문 화면이 다시 읽다가 401을 받지 않게).
       void navigate("/", { replace: true });
       queryClient.setQueryData(queryKeys.me, null);
       queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== queryKeys.me[0] });
       clearAttempts();
+      clearSelections();
     },
   });
 
