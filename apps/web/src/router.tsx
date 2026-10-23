@@ -1,11 +1,17 @@
+import type { ReactNode } from "react";
 import { createBrowserRouter, useParams } from "react-router";
 import { Layout } from "./components/Layout";
+import { RequireAdmin } from "./components/RequireAdmin";
 import { RequireLogin } from "./components/RequireLogin";
+import { AdminHomePage } from "./pages/admin/AdminHomePage";
+import { NewPerformancePage } from "./pages/admin/NewPerformancePage";
+import { RefundsPage } from "./pages/admin/RefundsPage";
+import { SalesPage } from "./pages/admin/SalesPage";
 import { AuthPage } from "./pages/AuthPage";
 import { MyOrdersPage } from "./pages/MyOrdersPage";
 import { OrderPage } from "./pages/OrderPage";
 import { PerformancesPage } from "./pages/PerformancesPage";
-import { NotFoundPage, Placeholder } from "./pages/Placeholder";
+import { NotFoundPage } from "./pages/NotFoundPage";
 import { SeatMapPage } from "./pages/SeatMapPage";
 
 // 경로의 id. 10진수 양의 정수가 아니면 없는 화면이다.
@@ -31,6 +37,13 @@ function OrderRoute() {
   );
 }
 
+function SalesRoute() {
+  const id = useIdParam();
+  return id === null ? <NotFoundPage /> : <SalesPage key={id} performanceId={id} />;
+}
+
+const admin = (page: ReactNode) => <RequireAdmin>{page}</RequireAdmin>;
+
 // 경로(DESIGN 6.5 경로). 주문 화면은 URL의 id만으로 다시 그린다(새로고침·뒤로 가기에 안전하다).
 export const router = createBrowserRouter([
   {
@@ -50,7 +63,10 @@ export const router = createBrowserRouter([
       },
       { path: "login", element: <AuthPage key="login" mode="login" /> },
       { path: "signup", element: <AuthPage key="signup" mode="signup" /> },
-      { path: "admin", element: <Placeholder title="관리자" /> },
+      { path: "admin", element: admin(<AdminHomePage />) },
+      { path: "admin/performances/new", element: admin(<NewPerformancePage />) },
+      { path: "admin/performances/:id/sales", element: admin(<SalesRoute />) },
+      { path: "admin/refunds", element: admin(<RefundsPage />) },
       { path: "*", element: <NotFoundPage /> },
     ],
   },
