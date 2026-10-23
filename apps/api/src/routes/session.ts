@@ -13,8 +13,11 @@ declare module "fastify" {
   }
 }
 
-// cookieSecure를 켜면 쿠키에 Secure를 붙이고 이름을 __Host-sid로 한다. 기본은 켬이라 운영에 안전하다.
-export type AuthConfig = { cookieSecure: boolean };
+// 인증 설정(DESIGN 6.3 설정). 기본값은 buildApp이 채운다.
+// cookieSecure: 켜면 쿠키에 Secure를 붙이고 이름을 __Host-sid로 한다. 기본은 켬이라 운영에 안전하다.
+// allowedOrigins: 상태를 바꾸는 요청의 Origin 허용 목록. 기본은 빈 목록(Origin을 보내는 브라우저 요청은 모두 거절).
+// authRateLimitPerMinute: 가입·로그인의 분당 허용 수(IP당, 로그인은 IP+이메일).
+export type AuthConfig = { cookieSecure: boolean; allowedOrigins: string[]; authRateLimitPerMinute: number };
 
 // 세션 쿠키를 굽고 지울 때 쓰는 속성. 브라우저는 이름·도메인·경로로 쿠키를 가리고, __Host- 쿠키는 Secure와 Path=/가 없는
 // Set-Cookie를 버린다. 그래서 지울 때도 구울 때와 같은 속성을 쓴다.
@@ -41,4 +44,25 @@ export function requireUser(db: Db, config: AuthConfig) {
 export function currentUser(request: FastifyRequest): SessionUser {
   if (!request.user) throw new Error("사용자 경로가 아닌 곳에서 currentUser를 불렀습니다");
   return request.user;
+}
+
+const STATE_CHANGING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+export const CSRF_HEADER = "x-requested-with";
+export const CSRF_HEADER_VALUE = "seat-booking";
+
+// 상태를 바꾸는 요청의 CSRF 확인(DESIGN 6.3 CSRF, 10장 58). 사용자·인증·관리자 경로를 가진 범위에 onRequest로 건다.
+// 1. Sec-Fetch-Site가 cross-site면 거절한다. 없으면(브라우저가 아닌 도구) 넘어간다.
+// 2. Origin이 있으면 허용 목록과 정확히 같아야 한다. "null"도 있는 값이라 거절한다.
+// 3. X-Requested-With: seat-booking이 있어야 한다. 다른 사이트의 폼은 헤더를 붙일 수 없고, fetch가 붙이면 preflight가 막힌다.
+// 세션 확인보다 먼저라 DB를 보지 않고 거절한다.
+export function csrfGuard(config: AuthConfig) {
+  return async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!STATE_CHANGING.has(request.method)) return;
+    const { origin } = request.headers;
+    const allowed =
+      request.headers["sec-fetch-site"] !== "cross-site" &&
+      (origin === undefined || config.allowedOrigins.includes(origin)) &&
+      request.headers[CSRF_HEADER] === CSRF_HEADER_VALUE;
+    if (!allowed) return reply.code(403).send({ error: "요청을 거절했습니다", code: "CSRF_REJECTED" });
+  };
 }

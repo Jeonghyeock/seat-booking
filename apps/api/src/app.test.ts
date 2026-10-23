@@ -69,6 +69,7 @@ describe("경로 범위", () => {
   it("세션 훅 범위의 경로는 모두 로그인하지 않으면 401이고 code가 남는다", async () => {
     await app.ready();
     expect(app.userRoutes.map((r) => `${r.method} ${r.url}`).sort()).toEqual([
+      "GET /auth/me",
       "GET /orders/:id",
       "GET /performances/:id/me",
       "POST /holds/:id/orders",

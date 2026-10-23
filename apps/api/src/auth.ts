@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { hash, verify } from "@node-rs/argon2";
+import { PASSWORD_MAX_INPUT_LENGTH } from "@seat-booking/shared";
 import { and, eq, gt, sql } from "drizzle-orm";
 import type { Db, Tx } from "./db/client.js";
 import { sessions, USER_ROLES, users } from "./db/schema.js";
@@ -20,9 +21,8 @@ export function normalizeEmail(email: string) {
 export const PASSWORD_MIN_LENGTH = 8;
 export const PASSWORD_MAX_LENGTH = 128;
 
-// 정규화 전에 볼 원문 길이(UTF-16 칸)의 상한. NFKC는 글자 하나를 최대 18배로 늘리므로(U+FDFA) 긴 입력을 먼저 버린다.
-// NFKC는 줄이기도 해서(한글 자모 셋이 한 글자) 128보다 넉넉히 둔다. 본문 스키마도 같은 상한을 쓴다.
-export const PASSWORD_MAX_INPUT_LENGTH = PASSWORD_MAX_LENGTH * 8;
+// 정규화 전에 볼 원문 길이(UTF-16 칸)의 상한은 본문 스키마와 같은 PASSWORD_MAX_INPUT_LENGTH(1,024)다.
+// NFKC는 글자 하나를 최대 18배로 늘리므로(U+FDFA) 긴 입력을 먼저 버린다. 줄이기도 해서(한글 자모 셋이 한 글자) 128보다 넉넉히 둔다.
 // 짝이 없는 서로게이트. argon2로 넘길 때 U+FFFD로 바뀌어 서로 다른 비밀번호가 같은 해시로 통과한다.
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
