@@ -90,6 +90,29 @@ export type HoldResponse = z.infer<typeof HoldResponse>;
 // HOLD_LIMIT: 이 회차에 쥔 좌석·산 좌석과 합치면 1인 한도를 넘는다.
 // PRICE_MISSING: 담은 좌석 중 이 회차에 가격이 없는 좌석(seatIds)이 있다. 그 좌석을 빼고 다시 고른다.
 // SEAT_UNAVAILABLE: 담은 좌석 중 이미 선점·판매됐거나 이 회차의 좌석이 아닌 것(seatIds)이 있다.
+// 이 회차에서 내 상태(GET /performances/:id/me). 새로고침·두 탭·응답 유실 뒤 내 선점과 주문을 다시 찾는다.
+// holds는 유효한 선점(좌석이 이 선점으로 아직 held이고 만료 전)만이고, 붙은 주문이 있으면 orderId다.
+// limit은 1인 한도와 지금 센 좌석(선점·구매), 더 선점할 수 있는 수다.
+export const MyPerformance = z.object({
+  performanceId: z.number().int().positive(),
+  serverTime: z.iso.datetime({ offset: true }),
+  limit: z.object({
+    limit: z.number().int().positive(),
+    heldSeats: z.number().int().nonnegative(),
+    purchasedSeats: z.number().int().nonnegative(),
+    remaining: z.number().int().nonnegative(),
+  }),
+  holds: z.array(
+    z.object({
+      holdId: z.number().int().positive(),
+      expiresAt: z.iso.datetime({ offset: true }),
+      seatIds: SeatIds,
+      orderId: z.number().int().positive().nullable(),
+    }),
+  ),
+});
+export type MyPerformance = z.infer<typeof MyPerformance>;
+
 const PriceMissing = z.object({ error: z.string(), code: z.literal("PRICE_MISSING"), seatIds: SeatIds });
 
 export const HoldConflict = z.discriminatedUnion("code", [
