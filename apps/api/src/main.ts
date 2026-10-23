@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { buildApp } from "./app.js";
 import { startCleanupLoop } from "./cleanup.js";
-import { loadAuthConfig } from "./config.js";
+import { loadAuthConfig, loadTrustProxy } from "./config.js";
 import { createDb } from "./db/client.js";
 import { createPool } from "./db/pool.js";
 import { FakePaymentProvider } from "./fake-pay.js";
@@ -18,10 +18,12 @@ const paymentProvider = new FakePaymentProvider(process.env.FAKE_PAY_SECRET || r
 
 // 화면의 origin(APP_ORIGIN), 쿠키 Secure(COOKIE_SECURE), 가입·로그인 분당 허용 수(DESIGN 6.3 설정).
 const auth = loadAuthConfig(process.env);
+// 프록시 뒤에서 요청한 쪽 IP를 읽는 방법(TRUST_PROXY). 속도 제한이 이 IP로 센다.
+const trustProxy = loadTrustProxy(process.env);
 
 const pool = createPool({ connectionString: databaseUrl });
-const app = buildApp(pool, { logger: true }, { paymentProvider, auth });
-app.log.info({ allowedOrigins: auth.allowedOrigins, cookieSecure: auth.cookieSecure }, "인증 설정");
+const app = buildApp(pool, { logger: true, trustProxy }, { paymentProvider, auth });
+app.log.info({ ...auth, trustProxy }, "인증 설정");
 if (auth.allowedOrigins.length === 0) {
   app.log.warn("APP_ORIGIN이 비어 있습니다. 브라우저가 보내는 상태 변경 요청(Origin이 붙음)은 모두 403입니다");
 }

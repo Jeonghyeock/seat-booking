@@ -10,13 +10,15 @@ declare module "fastify" {
   interface FastifyInstance {
     // 세션 훅 범위에 등록된 경로. 테스트가 모두 401인지 확인한다(새 경로가 401을 다른 스키마로 선언해 code가 지워지는 것을 잡는다).
     userRoutes: { method: string; url: string }[];
+    // 등록된 모든 경로(HEAD 빼고). 테스트가 상태를 바꾸는 경로는 웹훅 말고 모두 CSRF를 확인하는지 본다(범위 밖에 잘못 둔 경로를 잡는다).
+    allRoutes: { method: string; url: string }[];
   }
 }
 
 // 인증 설정(DESIGN 6.3 설정). 기본값은 buildApp이 채운다.
 // cookieSecure: 켜면 쿠키에 Secure를 붙이고 이름을 __Host-sid로 한다. 기본은 켬이라 운영에 안전하다.
 // allowedOrigins: 상태를 바꾸는 요청의 Origin 허용 목록. 기본은 빈 목록(Origin을 보내는 브라우저 요청은 모두 거절).
-// authRateLimitPerMinute: 가입·로그인의 분당 허용 수(IP당, 로그인은 IP+이메일).
+// authRateLimitPerMinute: 가입·로그인의 분당 허용 수(가입은 IP당, 로그인은 IP+이메일당. 로그인은 IP 하나로도 그 10배까지).
 export type AuthConfig = { cookieSecure: boolean; allowedOrigins: string[]; authRateLimitPerMinute: number };
 
 // 세션 쿠키를 굽고 지울 때 쓰는 속성. 브라우저는 이름·도메인·경로로 쿠키를 가리고, __Host- 쿠키는 Secure와 Path=/가 없는
@@ -47,8 +49,8 @@ export function currentUser(request: FastifyRequest): SessionUser {
 }
 
 const STATE_CHANGING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-export const CSRF_HEADER = "x-requested-with";
-export const CSRF_HEADER_VALUE = "seat-booking";
+const CSRF_HEADER = "x-requested-with";
+const CSRF_HEADER_VALUE = "seat-booking";
 
 // 상태를 바꾸는 요청의 CSRF 확인(DESIGN 6.3 CSRF, 10장 58). 사용자·인증·관리자 경로를 가진 범위에 onRequest로 건다.
 // 1. Sec-Fetch-Site가 cross-site면 거절한다. 없으면(브라우저가 아닌 도구) 넘어간다.

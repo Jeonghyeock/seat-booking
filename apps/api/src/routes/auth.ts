@@ -1,3 +1,4 @@
+import rateLimit from "@fastify/rate-limit";
 import {
   AuthError,
   AuthUser,
@@ -5,6 +6,7 @@ import {
   EmailTaken,
   ErrorResponse,
   InvalidCredentials,
+  TooManyRequests,
   TryAgainLater,
 } from "@seat-booking/shared";
 import { eq } from "drizzle-orm";
@@ -25,22 +27,34 @@ import type { Db } from "../db/client.js";
 import { users } from "../db/schema.js";
 import { type AuthConfig, currentUser, sessionCookieOptions } from "./session.js";
 
+// 로그인은 IP+이메일 말고 IP 하나로도 센다. 그 상한은 IP+이메일 상한의 이 배수다.
+export const LOGIN_PER_IP_FACTOR = 10;
+
 // 가입·로그인·로그아웃(DESIGN 6.3 계정). CSRF 확인 범위 안에 등록한다. 내 정보(meRoutes)는 세션 훅 범위 안이다.
-// 응답에 Cache-Control: no-store를 붙인다(사용자 정보가 캐시에 남지 않게).
 export const authRoutes: FastifyPluginAsyncZod<{ db: Db; config: AuthConfig }> = async (app, { db, config }) => {
   const cookieName = sessionCookieName(config.cookieSecure);
-  app.addHook("onSend", async (_request, reply) => {
-    reply.header("cache-control", "no-store");
-  });
 
-  // 로그인·가입 시도는 IP당 분당 정해진 수까지다(10장 61). 로그인은 IP+이메일로 센다(한 IP에서 여러 계정을 막지 않게).
-  // 본문을 봐야 하므로 preHandler에서 센다.
-  const rateLimit = (keyOf: (request: FastifyRequest) => string) => ({
-    max: config.authRateLimitPerMinute,
-    timeWindow: "1 minute",
-    hook: "preHandler" as const,
-    keyGenerator: keyOf,
-  });
+  // 속도 제한(10장 61). 가입은 IP당, 로그인은 IP+이메일당 분당 authRateLimitPerMinute회다. 로그인은 IP 하나로도 그 10배까지다.
+  // 이메일을 바꿔 가며 보내 IP+이메일 카운터를 밀어내거나 해시 자리를 차지하는 것을 막는다. 같은 NAT 뒤 사용자를 생각해 넉넉히 둔다.
+  // 저장소는 메모리라 서버마다 따로 센다. 이메일을 봐야 하므로 본문 검증 뒤 preHandler에서 센다(형식이 틀린 400은 세지 않는다).
+  await app.register(rateLimit, { global: false });
+  const limit = (max: number, keyOf: (request: FastifyRequest) => string) => {
+    const count = app.createRateLimit({ max, timeWindow: "1 minute", keyGenerator: keyOf });
+    return async (request: FastifyRequest, reply: FastifyReply) => {
+      const result = await count(request);
+      if (result.isAllowed || !result.isExceeded) return;
+      return reply
+        .code(429)
+        .header("retry-after", String(result.ttlInSeconds))
+        .send({ error: `요청이 너무 많습니다. ${result.ttlInSeconds}초 뒤에 다시 시도해 주세요`, code: "TOO_MANY_REQUESTS" });
+    };
+  };
+  const signupPerIp = limit(config.authRateLimitPerMinute, (request) => request.ip);
+  const loginPerIp = limit(config.authRateLimitPerMinute * LOGIN_PER_IP_FACTOR, (request) => request.ip);
+  const loginPerEmail = limit(
+    config.authRateLimitPerMinute,
+    (request) => `${request.ip}:${(request.body as Credentials).email}`,
+  );
 
   // 비밀번호 해시가 밀려 있으면 503과 Retry-After다(동시 해시 2개 제한, 10장 61).
   const busy = (reply: FastifyReply) =>
@@ -60,7 +74,7 @@ export const authRoutes: FastifyPluginAsyncZod<{ db: Db; config: AuthConfig }> =
   app.post(
     "/auth/signup",
     {
-      config: { rateLimit: rateLimit((request) => request.ip) },
+      preHandler: signupPerIp,
       schema: {
         body: Credentials,
         response: {
@@ -68,7 +82,7 @@ export const authRoutes: FastifyPluginAsyncZod<{ db: Db; config: AuthConfig }> =
           400: ErrorResponse,
           403: AuthError,
           409: EmailTaken,
-          429: ErrorResponse,
+          429: TooManyRequests,
           503: TryAgainLater,
         },
       },
@@ -105,12 +119,17 @@ export const authRoutes: FastifyPluginAsyncZod<{ db: Db; config: AuthConfig }> =
   app.post(
     "/auth/login",
     {
-      config: {
-        rateLimit: rateLimit((request) => `${request.ip}:${(request.body as Credentials | undefined)?.email ?? ""}`),
-      },
+      preHandler: [loginPerIp, loginPerEmail],
       schema: {
         body: Credentials,
-        response: { 200: AuthUser, 401: InvalidCredentials, 403: AuthError, 429: ErrorResponse, 503: TryAgainLater },
+        response: {
+          200: AuthUser,
+          400: ErrorResponse,
+          401: InvalidCredentials,
+          403: AuthError,
+          429: TooManyRequests,
+          503: TryAgainLater,
+        },
       },
     },
     async (request, reply) => {
@@ -130,7 +149,9 @@ export const authRoutes: FastifyPluginAsyncZod<{ db: Db; config: AuthConfig }> =
         matched = await verifyPassword(user?.passwordHash ?? null, password);
       } catch (err) {
         if (err instanceof PasswordHasherBusy) return busy(reply);
-        throw err;
+        // 저장된 해시가 깨져 있으면 검증이 던진다. 500이면 그 계정이 있다는 것이 드러나므로 같은 401로 보내고 로그에 남긴다.
+        request.log.error({ err, userId: user?.id }, "저장된 비밀번호 해시를 검증하지 못함");
+        return invalid();
       }
       if (!user || !matched) return invalid();
 
@@ -166,8 +187,7 @@ export const meRoutes: FastifyPluginAsyncZod = async (app) => {
   app.get(
     "/auth/me",
     { schema: { response: { 200: AuthUser, 401: AuthError, 403: AuthError } } },
-    async (request, reply) => {
-      reply.header("cache-control", "no-store");
+    async (request) => {
       const user = currentUser(request);
       return { userId: user.id, email: user.email, role: user.role };
     },

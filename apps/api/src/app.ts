@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
 import cookie from "@fastify/cookie";
-import rateLimit from "@fastify/rate-limit";
 import { HealthResponse, HealthUnavailable } from "@seat-booking/shared";
 import Fastify, { type FastifyError, type FastifyServerOptions } from "fastify";
 import { serializerCompiler, validatorCompiler, type ZodTypeProvider } from "fastify-type-provider-zod";
@@ -33,16 +32,12 @@ export function buildApp(
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
   app.register(cookie);
-  // 경로마다 켠다(가입·로그인). 넘으면 429와 Retry-After다. 저장소는 메모리라 서버마다 따로 센다(10장 61).
-  app.register(rateLimit, {
-    global: false,
-    errorResponseBuilder: (_request, context) => ({
-      statusCode: 429,
-      message: `요청이 너무 많습니다. ${context.after} 뒤에 다시 시도해 주세요`,
-    }),
-  });
   app.decorateRequest("user", null);
   app.decorate("userRoutes", [] as { method: string; url: string }[]);
+  app.decorate("allRoutes", [] as { method: string; url: string }[]);
+  app.addHook("onRoute", (route) => {
+    for (const method of [route.method].flat()) if (method !== "HEAD") app.allRoutes.push({ method, url: route.url });
+  });
 
   // 5xx는 오류 내용을 로그에만 남기고 응답에는 싣지 않는다. Drizzle 오류 메시지에는 SQL 문장과 파라미터가 들어 있다.
   // 4xx(요청 검증 실패 등)는 무엇이 틀렸는지 알려 준다.
@@ -88,6 +83,10 @@ export function buildApp(
   // 루트에 걸지 않아 없는 경로는 404 그대로다(DESIGN 6.3 훅의 위치와 응답 순서).
   app.register(async (web) => {
     web.addHook("onRequest", csrfGuard(authConfig));
+    // 쿠키로 사용자를 고르는 응답이다. 오류 응답(401·403·429)까지 캐시에 남기지 않는다.
+    web.addHook("onSend", async (_request, reply) => {
+      reply.header("cache-control", "no-store");
+    });
     web.register(authRoutes, { db, config: authConfig });
     // 사용자 경로. 이 범위의 훅이 세션으로 사용자를 찾는다.
     web.register(async (userScope) => {
