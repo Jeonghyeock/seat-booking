@@ -12,11 +12,11 @@ describe("POST /performances/:id/holds", () => {
     await pool.end();
   });
 
-  const hold = (performanceId: number, userId: number | string | undefined, seatIds: unknown) =>
+  const hold = (performanceId: number, userId: number | undefined, seatIds: unknown) =>
     app.inject({
       method: "POST",
       url: `/performances/${performanceId}/holds`,
-      headers: userId === undefined ? {} : authHeaders(userId),
+      headers: authHeaders(userId),
       payload: { seatIds },
     });
 

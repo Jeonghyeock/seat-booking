@@ -7,12 +7,17 @@ declare module "fastify" {
     // 로그인한 사용자. 사용자 경로의 훅만 채운다(DESIGN 6.3). 그 밖의 경로에서는 null이다.
     user: SessionUser | null;
   }
+  interface FastifyInstance {
+    // 세션 훅 범위에 등록된 경로. 테스트가 모두 401인지 확인한다(새 경로가 401을 다른 스키마로 선언해 code가 지워지는 것을 잡는다).
+    userRoutes: { method: string; url: string }[];
+  }
 }
 
 // cookieSecure를 켜면 쿠키에 Secure를 붙이고 이름을 __Host-sid로 한다. 기본은 켬이라 운영에 안전하다.
 export type AuthConfig = { cookieSecure: boolean };
 
-// 세션 쿠키를 굽고 지울 때 쓰는 속성. 이름과 속성이 같아야 브라우저가 같은 쿠키로 본다.
+// 세션 쿠키를 굽고 지울 때 쓰는 속성. 브라우저는 이름·도메인·경로로 쿠키를 가리고, __Host- 쿠키는 Secure와 Path=/가 없는
+// Set-Cookie를 버린다. 그래서 지울 때도 구울 때와 같은 속성을 쓴다.
 export const sessionCookieOptions = (config: AuthConfig) =>
   ({ path: "/", httpOnly: true, sameSite: "lax", secure: config.cookieSecure }) as const;
 

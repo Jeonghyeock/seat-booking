@@ -20,13 +20,15 @@ export function buildApp(
   options: FastifyServerOptions = {},
   services: { paymentProvider?: FakePaymentProvider; auth?: Partial<AuthConfig> } = {},
 ) {
-  const authConfig: AuthConfig = { cookieSecure: true, ...services.auth };
+  // undefined가 넘어와도 Secure가 꺼지지 않게 값마다 기본값을 채운다.
+  const authConfig: AuthConfig = { cookieSecure: services.auth?.cookieSecure ?? true };
   // 요청은 packages/shared의 zod 스키마로 검증하고, 응답도 같은 스키마로 직렬화한다.
   const app = Fastify(options).withTypeProvider<ZodTypeProvider>();
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
   app.register(cookie);
   app.decorateRequest("user", null);
+  app.decorate("userRoutes", [] as { method: string; url: string }[]);
 
   // 5xx는 오류 내용을 로그에만 남기고 응답에는 싣지 않는다. Drizzle 오류 메시지에는 SQL 문장과 파라미터가 들어 있다.
   // 4xx(요청 검증 실패 등)는 무엇이 틀렸는지 알려 준다.
@@ -71,6 +73,9 @@ export function buildApp(
   // 사용자 경로. 이 범위의 훅이 세션으로 사용자를 찾는다(DESIGN 6.3). 루트에 걸지 않아 없는 경로는 404 그대로다.
   app.register(async (userScope) => {
     userScope.addHook("onRequest", requireUser(db, authConfig));
+    userScope.addHook("onRoute", (route) => {
+      for (const method of [route.method].flat()) if (method !== "HEAD") app.userRoutes.push({ method, url: route.url });
+    });
     userScope.register(holdRoutes, { db });
     userScope.register(orderRoutes, { db });
     userScope.register(paymentRoutes, { db, provider: paymentProvider });
