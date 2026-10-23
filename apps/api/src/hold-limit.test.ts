@@ -29,7 +29,12 @@ describe("1인 좌석 한도(C6)", () => {
     const { performanceId, seatIds } = await newPerformance(pool);
     const [userId] = await newUsers(pool, 1);
     expect(codeOf(await hold(performanceId, userId!, seatIds.slice(0, 3)))).toBe(201);
-    expect(codeOf(await hold(performanceId, userId!, seatIds.slice(3, 5)))).toBe("HOLD_LIMIT");
+    expect(HoldConflict.parse((await hold(performanceId, userId!, seatIds.slice(3, 5))).json())).toMatchObject({
+      code: "HOLD_LIMIT",
+      limit: 4,
+      heldSeats: 3,
+      purchasedSeats: 0,
+    });
     expect(codeOf(await hold(performanceId, userId!, [seatIds[3]!]))).toBe(201);
     expect(codeOf(await hold(performanceId, userId!, [seatIds[4]!]))).toBe("HOLD_LIMIT");
   });
@@ -47,6 +52,28 @@ describe("1인 좌석 한도(C6)", () => {
       held.holdId,
     ]);
     expect(codeOf(await hold(first.performanceId, userId!, first.seatIds.slice(4, 8)))).toBe(201);
+  });
+
+  it("팔린 좌석도 한도에 센다. 선점의 만료 시각이 지난 팔린 좌석도 센다", async () => {
+    const { performanceId, seatIds } = await newPerformance(pool);
+    const [userId] = await newUsers(pool, 1);
+    const bought = HoldResponse.parse((await hold(performanceId, userId!, seatIds.slice(0, 3))).json());
+    // 결제 확정(다음 PR) 대신 좌석을 sold로 바꾼다. 확정은 선점(hold_id)과 만료 시각을 그대로 남긴다(DESIGN 10장 16)
+    await pool.query("update holds set expires_at = now() - interval '1 second' where id = $1", [bought.holdId]);
+    await pool.query(
+      "update performance_seats set status = 'sold', hold_expires_at = now() - interval '1 second' where hold_id = $1",
+      [bought.holdId],
+    );
+
+    const over = await hold(performanceId, userId!, seatIds.slice(3, 5));
+    expect(HoldConflict.parse(over.json())).toMatchObject({ code: "HOLD_LIMIT", heldSeats: 0, purchasedSeats: 3 });
+    expect(codeOf(await hold(performanceId, userId!, [seatIds[3]!]))).toBe(201);
+    const full = await hold(performanceId, userId!, [seatIds[4]!]);
+    expect(HoldConflict.parse(full.json())).toMatchObject({ code: "HOLD_LIMIT", heldSeats: 1, purchasedSeats: 3 });
+
+    // 다른 사용자의 팔린 좌석은 세지 않는다
+    const [other] = await newUsers(pool, 1);
+    expect(codeOf(await hold(performanceId, other!, seatIds.slice(4, 8)))).toBe(201);
   });
 
   it("C6: 한 사용자가 8개 창에서 동시에 한 석씩 선점하면 정확히 4석만 잡힌다", async () => {
