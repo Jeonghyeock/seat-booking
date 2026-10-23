@@ -1,0 +1,164 @@
+.map {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+}
+
+.stage {
+  text-align: center;
+  font-size: var(--font-sm);
+  color: var(--color-text-muted);
+  padding: var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+}
+
+.section {
+  display: grid;
+  gap: var(--space-1);
+  justify-items: center;
+}
+
+.sectionTitle {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-sm);
+  color: var(--color-text-muted);
+}
+
+.row {
+  display: flex;
+  gap: var(--space-1);
+  align-items: center;
+}
+
+.rowLabel {
+  width: 1.5rem;
+  text-align: right;
+  margin-right: var(--space-1);
+  font-size: var(--font-sm);
+  color: var(--color-text-muted);
+}
+
+/* 등급 바탕색(옅게). 상태 무늬·글자가 위에 얹힌다. */
+.seat,
+.swatch {
+  --grade-bg: #dce7ff;
+}
+
+.seat[data-grade="1"],
+.swatch[data-grade="1"] {
+  --grade-bg: #ffe3c2;
+}
+
+.seat[data-grade="2"],
+.swatch[data-grade="2"] {
+  --grade-bg: #d6f1df;
+}
+
+.seat[data-grade="3"],
+.swatch[data-grade="3"] {
+  --grade-bg: #f3d9f2;
+}
+
+.seat[data-grade="4"],
+.swatch[data-grade="4"] {
+  --grade-bg: #fff3b8;
+}
+
+.seat[data-grade="5"],
+.swatch[data-grade="5"] {
+  --grade-bg: #d9f3f6;
+}
+
+.seat {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  font-size: 0.75rem;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+  border: 2px solid transparent;
+  background: var(--grade-bg);
+  color: #17191c;
+}
+
+.swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-right: var(--space-2);
+  font-size: 0.7rem;
+  vertical-align: middle;
+  border-radius: 0.25rem;
+  border: 2px solid transparent;
+  background: var(--grade-bg);
+  color: #17191c;
+}
+
+.seat[data-state="available"],
+.swatch[data-state="available"] {
+  border-color: #6f7c94;
+}
+
+.seat[data-state="selected"],
+.swatch[data-state="selected"] {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-text);
+  font-weight: 700;
+}
+
+/* 내 선점: 사선 무늬 */
+.seat[data-state="mine"],
+.swatch[data-state="mine"] {
+  background: repeating-linear-gradient(45deg, var(--color-success) 0 4px, #e7f5ec 4px 8px);
+  border-color: var(--color-success);
+  font-weight: 700;
+}
+
+.seat[data-state="held"],
+.swatch[data-state="held"] {
+  background: #b7bdc7;
+  color: #3b414b;
+}
+
+.seat[data-state="sold"],
+.swatch[data-state="sold"] {
+  background: #59606b;
+  color: #f1f2f4;
+}
+
+/* 가격 미정: 점선 테두리 */
+.seat[data-state="unpriced"],
+.swatch[data-state="unpriced"] {
+  background: transparent;
+  border: 2px dashed #8a93a3;
+  color: var(--color-text-muted);
+}
+
+.seat[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  font-size: var(--font-sm);
+}
+
+.legend ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+}

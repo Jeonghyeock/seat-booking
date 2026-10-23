@@ -46,6 +46,19 @@ export function formatRemaining(ms: number): string {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
+// 카운트다운. 하루가 넘으면 "3일 4시간", 한 시간이 넘으면 "1:02:03", 그 밖에는 "4:59"다.
+export function formatCountdown(ms: number): string {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const days = Math.floor(total / 86_400);
+  const hours = Math.floor((total % 86_400) / 3600);
+  if (days > 0) return `${days}일 ${hours}시간`;
+  if (hours > 0) {
+    const minutes = Math.floor((total % 3600) / 60);
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+  }
+  return formatRemaining(ms);
+}
+
 // 원화 금액 "150,000원".
 export function formatWon(amount: number): string {
   return `${amount.toLocaleString("ko-KR")}원`;
