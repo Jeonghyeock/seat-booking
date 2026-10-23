@@ -1,0 +1,124 @@
+import {
+  CreateOrderConflict,
+  ErrorResponse,
+  HoldParams,
+  IdempotencyKeyReused,
+  IdempotentUserHeaders,
+  OrderParams,
+  OrderView,
+  UserHeaders,
+} from "@seat-booking/shared";
+import { and, eq } from "drizzle-orm";
+import type { FastifyReply } from "fastify";
+import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
+import type { Db } from "../db/client.js";
+import { holds, orders, users } from "../db/schema.js";
+import { hashRequest, type IdempotencyOutcome, withIdempotencyKey } from "../idempotency.js";
+import { type CreateOrderFailure, createOrder, loadOrderView } from "../orders.js";
+
+// 멱등 키 결과를 응답으로 보낸다. 다시 보낸 요청에는 처음 응답을 그대로 주고 Idempotent-Replayed 헤더를 붙인다.
+// 본문의 serverTime과 상태도 처음 것이라, 화면은 이 헤더를 보면 조회로 최신 상태를 다시 읽는다(DESIGN 6.2 멱등성).
+export function sendIdempotent(reply: FastifyReply, outcome: IdempotencyOutcome) {
+  switch (outcome.kind) {
+    case "key_reused":
+      return reply
+        .code(422)
+        .send({ error: "이 Idempotency-Key는 다른 요청에 쓰였습니다", code: "IDEMPOTENCY_KEY_REUSED" });
+    case "in_progress":
+      return reply
+        .code(409)
+        .header("retry-after", "1")
+        .send({ error: "같은 요청을 처리하고 있습니다. 잠시 뒤 같은 Idempotency-Key로 다시 보내 주세요", code: "REQUEST_IN_PROGRESS" });
+    case "response":
+      if (outcome.replayed) reply.header("idempotent-replayed", "true");
+      return reply.code(outcome.response.statusCode).send(outcome.response.body);
+  }
+}
+
+function conflictBody(failure: CreateOrderFailure): CreateOrderConflict {
+  switch (failure.code) {
+    case "HOLD_EXPIRED":
+      return {
+        error: "선점 시간이 끝났습니다. 좌석을 다시 골라 주세요",
+        code: failure.code,
+        expiredAt: failure.expiredAt.toISOString(),
+      };
+    case "ORDER_EXISTS":
+      return { error: "이 선점으로 만든 주문이 이미 있습니다", code: failure.code, orderId: failure.orderId };
+    case "PRICE_MISSING":
+      return { error: "가격이 정해지지 않은 좌석이 있습니다", code: failure.code, seatIds: failure.seatIds };
+  }
+}
+
+export const orderRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db }) => {
+  app.post(
+    "/holds/:id/orders",
+    {
+      schema: {
+        params: HoldParams,
+        headers: IdempotentUserHeaders,
+        response: {
+          201: OrderView,
+          401: ErrorResponse,
+          404: ErrorResponse,
+          409: CreateOrderConflict,
+          422: IdempotencyKeyReused,
+        },
+      },
+    },
+    async (request, reply) => {
+      const holdId = request.params.id;
+      const userId = request.headers["x-user-id"];
+
+      // 없는 사용자와 남의 선점은 멱등 키를 잡기 전에 거른다. 키 행은 사용자를 외래 키로 가리키고, 이 확인은 아무것도 바꾸지 않는다.
+      const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
+      if (!user) return reply.code(401).send({ error: "없는 사용자입니다" });
+      const [hold] = await db
+        .select({ id: holds.id })
+        .from(holds)
+        .where(and(eq(holds.id, holdId), eq(holds.userId, userId)));
+      if (!hold) return reply.code(404).send({ error: "선점을 찾을 수 없습니다" });
+
+      const scope = {
+        userId,
+        route: "POST /holds/:id/orders",
+        key: request.headers["idempotency-key"],
+        requestHash: hashRequest({ holdId }),
+      };
+      const outcome = await withIdempotencyKey(db, scope, async (saveInTx) => {
+        const result = await createOrder(db, { userId, holdId }, (tx, view) =>
+          saveInTx(tx, { statusCode: 201, body: view }),
+        );
+        if (result.ok) return { response: { statusCode: 201, body: result.view }, keep: "saved" };
+        // 주문 생성의 409는 모두 다시 보내도 결과가 같다(DESIGN 6.2 멱등성 4).
+        return { response: { statusCode: 409, body: conflictBody(result) }, keep: "save" };
+      });
+      return sendIdempotent(reply, outcome);
+    },
+  );
+
+  app.get(
+    "/orders/:id",
+    {
+      schema: {
+        params: OrderParams,
+        headers: UserHeaders,
+        response: { 200: OrderView, 401: ErrorResponse, 404: ErrorResponse },
+      },
+    },
+    async (request, reply) => {
+      const orderId = request.params.id;
+      const userId = request.headers["x-user-id"];
+
+      const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
+      if (!user) return reply.code(401).send({ error: "없는 사용자입니다" });
+      // 남의 주문도 없는 주문과 같이 404다.
+      const [order] = await db
+        .select({ id: orders.id })
+        .from(orders)
+        .where(and(eq(orders.id, orderId), eq(orders.userId, userId)));
+      if (!order) return reply.code(404).send({ error: "주문을 찾을 수 없습니다" });
+      return (await loadOrderView(db, orderId))!;
+    },
+  );
+};

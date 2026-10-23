@@ -4,6 +4,7 @@ import { serializerCompiler, validatorCompiler, type ZodTypeProvider } from "fas
 import type pg from "pg";
 import { createDb } from "./db/client.js";
 import { holdRoutes } from "./routes/holds.js";
+import { orderRoutes } from "./routes/orders.js";
 import { performanceRoutes } from "./routes/performances.js";
 
 export function buildApp(pool: pg.Pool, options: FastifyServerOptions = {}) {
@@ -39,6 +40,7 @@ export function buildApp(pool: pg.Pool, options: FastifyServerOptions = {}) {
   const db = createDb(pool);
   app.register(performanceRoutes, { db });
   app.register(holdRoutes, { db });
+  app.register(orderRoutes, { db });
 
   return app;
 }
