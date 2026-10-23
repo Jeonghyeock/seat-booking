@@ -118,7 +118,11 @@ export const orderRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db }
         .from(orders)
         .where(and(eq(orders.id, orderId), eq(orders.userId, userId)));
       if (!order) return reply.code(404).send({ error: "주문을 찾을 수 없습니다" });
-      return (await loadOrderView(db, orderId))!;
+      // 주문·좌석·결제·표를 한 스냅샷에서 읽는다. 따로 읽으면 확정이 그사이 커밋되어 pending 주문에 성공한 결제가 붙어 보인다(리뷰 L1).
+      return (await db.transaction((tx) => loadOrderView(tx, orderId), {
+        isolationLevel: "repeatable read",
+        accessMode: "read only",
+      }))!;
     },
   );
 };

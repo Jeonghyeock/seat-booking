@@ -147,7 +147,7 @@
 
 | 경로 | 잡는 순서 |
 |---|---|
-| 주문 생성 | 선점·좌석은 잠그지 않고 읽는다 → 주문 INSERT(같은 선점의 다른 주문이 있으면 `hold_id` unique에서 기다린다) |
+| 주문 생성 | 선점·좌석은 잠그지 않고 읽는다 → 주문 INSERT(같은 선점의 다른 주문이 있으면 `hold_id` unique에서 기다린다) → 멱등 키 행(마지막) |
 | 결제 요청 A | 주문 → 결제 행 INSERT |
 | 결제 요청 B(`provider_ref` 채우기) | 결제만 |
 | 웹훅 받기 | 웹훅 행 INSERT(같은 이벤트가 처리 중이면 `event_id` unique에서 기다린다) → 결제 확정·실패 반영 |
@@ -214,9 +214,9 @@
 | cancelled | requested | "결제 결과 확인 중. 결제됐다면 자동 환불됩니다" |
 | cancelled | refund_pending·refunded·refund_failed | 환불 진행 중 / 환불 완료(금액·시각) / 환불 지연, 문의 |
 
-5단계 화면에서 지킬 것(지금 정해 둠): 좌석은 모아 한 번에 선점한다(묶음마다 주문·결제가 따로 생긴다). "내 예매"에는 paid뿐 아니라 결제가 붙은 cancelled 주문(환불 중·완료)도 넣는다. 관리자 판매 현황에 refund_failed 목록을 둔다.
+5단계 화면에서 지킬 것(지금 정해 둠): 좌석은 모아 한 번에 선점한다(묶음마다 주문·결제가 따로 생긴다). 화면이 다른 origin에서 돌면 `Retry-After`·`Idempotent-Replayed`를 읽도록 `Access-Control-Expose-Headers`에 넣는다. "내 예매"에는 paid뿐 아니라 결제가 붙은 cancelled 주문(환불 중·완료)도 넣는다. 관리자 판매 현황에 refund_failed 목록을 둔다.
 
-**주문 생성.** 한 트랜잭션에서 선점이 이 사용자의 것이고 만료 전인지, 그 선점의 좌석이 모두 `held`로 남았는지 보고, 좌석마다 그때의 등급 가격을 `order_items`에 복사한다. `orders.amount`는 그 합이다. 나중에 `performance_grades`의 가격이 바뀌어도 이미 낸 금액은 그대로다. 선점 하나에 주문 하나(`orders.hold_id` unique)라 다른 키로 두 번 와도 두 번째는 `ORDER_EXISTS`다.
+**주문 생성.** 한 트랜잭션에서 선점이 이 사용자의 것이고 만료 전인지, 그 선점의 좌석이 모두 `held`로 남았는지 보고(좌석을 읽는 문장 안에서 `clock_timestamp()`로 만료를 본다. 문장이 기다린 사이 만료되어 다른 선점이 가져간 좌석만 빠진 주문이 생기지 않게), 좌석마다 그때의 등급 가격을 `order_items`에 복사한다. `orders.amount`는 그 합이다. 나중에 `performance_grades`의 가격이 바뀌어도 이미 낸 금액은 그대로다. 선점 하나에 주문 하나(`orders.hold_id` unique)라 다른 키로 두 번 와도 두 번째는 `ORDER_EXISTS`다.
 
 **결제 요청.** 결제사를 부르기 전에 결제 행부터 넣는다.
 

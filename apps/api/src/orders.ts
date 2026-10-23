@@ -35,6 +35,7 @@ export async function loadOrderView(db: Db | Tx, orderId: number): Promise<Order
       amount: orders.amount,
       holdExpiresAt: holds.expiresAt,
       holdExpired: sql<boolean>`${holds.expiresAt} < now()`,
+      // tx.execute와 sql 조각은 timestamptz를 문자열로 돌려주므로, timestamptz 열의 변환으로 Date를 받는다.
       serverTime: sql`now()`.mapWith(holds.expiresAt),
     })
     .from(orders)
@@ -96,7 +97,11 @@ export async function loadOrderView(db: Db | Tx, orderId: number): Promise<Order
 // 선점으로 주문(pending)을 만든다(DESIGN 6.2 주문 생성). 부르는 쪽이 선점이 이 사용자의 것인지 먼저 확인한다.
 // 1. 이 선점의 주문이 이미 있으면 ORDER_EXISTS. 선점 하나에 주문 하나다(orders.hold_id unique).
 // 2. 선점이 만료됐으면 HOLD_EXPIRED. 만료 전이면 선점의 좌석이 모두 held로 남아 있다.
-//    좌석을 푸는 것은 만료(정리 작업)와 주문 취소뿐이고, 취소는 1에서 걸린다. 그래서 좌석은 잠그지 않고 읽는다.
+//    좌석이 선점에서 빠지는 것은 만료 뒤(정리 작업이 풀거나 다른 선점이 가져감)와 주문 취소뿐이고, 취소는 1에서 걸린다.
+//    그래서 좌석은 잠그지 않고 읽는다. 만료는 좌석을 읽는 문장 안에서 행마다 clock_timestamp()로 본다.
+//    다른 선점이 가져간 좌석이 이 문장에 보인다면 그 커밋은 만료 뒤이고 이 문장의 스냅샷은 그 커밋 뒤라,
+//    남은 좌석도 모두 만료로 빠져 HOLD_EXPIRED다. now()(트랜잭션 시작)는 스냅샷보다 이르고, statement_timestamp()도
+//    "받은 메시지의 시각"이라 문장이 기다리기 전일 수 있다. 그러면 가져간 좌석만 빠진 주문이 생긴다(리뷰 L2).
 // 3. 가격이 없는 좌석이 있으면 PRICE_MISSING. 선점 때 막으므로 마지막 방어다.
 // 4. 좌석과 그때의 가격을 order_items에 복사하고, 그 합을 amount로 주문을 넣는다.
 //    다른 키로 같은 선점의 주문을 동시에 만들면 hold_id unique에서 먼저 넣은 쪽이 끝나길 기다린다.
@@ -114,7 +119,7 @@ export function createOrder(
     if (existing) return { ok: false, code: "ORDER_EXISTS", orderId: existing.id };
 
     const [hold] = await tx
-      .select({ expiresAt: holds.expiresAt, expired: sql<boolean>`${holds.expiresAt} < now()` })
+      .select({ expiresAt: holds.expiresAt, expired: sql<boolean>`${holds.expiresAt} < statement_timestamp()` })
       .from(holds)
       .where(eq(holds.id, holdId));
     const heldSeats = hold!.expired
@@ -131,7 +136,7 @@ export function createOrder(
             and(
               eq(performanceSeats.holdId, holdId),
               eq(performanceSeats.status, "held"),
-              sql`${performanceSeats.holdExpiresAt} >= now()`,
+              sql`${performanceSeats.holdExpiresAt} >= clock_timestamp()`,
             ),
           )
           .orderBy(asc(performanceSeats.seatId));

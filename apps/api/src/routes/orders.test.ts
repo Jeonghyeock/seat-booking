@@ -205,6 +205,24 @@ describe("POST /holds/:id/orders, GET /orders/:id", () => {
     }
   });
 
+  it("잠금 대기가 3초를 넘으면 500이고, 키를 지워 같은 키로 다시 보낼 수 있다", async () => {
+    const { userId, hold } = await newHold();
+    const key = randomUUID();
+    const holder = await admin.connect();
+    try {
+      await holder.query("begin");
+      await holder.query("insert into orders (user_id, hold_id, amount) values ($1, $2, 0)", [userId, hold.holdId]);
+      expect((await createOrder(hold.holdId, userId, key)).statusCode).toBe(500);
+      const { rows } = await admin.query("select count(*) as n from idempotency_keys where key = $1", [key]);
+      expect(rows[0].n).toBe(0);
+      await holder.query("rollback");
+      expect((await createOrder(hold.holdId, userId, key)).statusCode).toBe(201);
+    } finally {
+      await holder.query("rollback").catch(() => {});
+      holder.release();
+    }
+  }, 15_000);
+
   it("1분 넘게 처리 중인 키는 넘겨받아 처리하고, 1분이 안 된 키는 409 REQUEST_IN_PROGRESS다", async () => {
     const { userId, hold } = await newHold();
     const insertKey = (key: string, age: string) =>
@@ -238,6 +256,46 @@ describe("POST /holds/:id/orders, GET /orders/:id", () => {
     const again = await createOrder(hold.holdId, userId, key);
     expect(again.headers["idempotent-replayed"]).toBe("true");
     expect(again.json()).toEqual(res.json());
+    expect(await countOrders(hold.holdId)).toBe(0);
+  });
+
+  it("좌석을 읽는 문장이 기다리는 사이 만료되고 다른 선점이 좌석 하나를 가져가면, 남은 좌석만으로 주문하지 않고 HOLD_EXPIRED다", async () => {
+    const { performanceId, userId, hold } = await newHold(2);
+    const { rows: expiry } = await admin.query<{ at: Date }>(
+      "update holds set expires_at = now() + interval '1 second' where id = $1 returning expires_at as at",
+      [hold.holdId],
+    );
+    await admin.query("update performance_seats set hold_expires_at = $2 where hold_id = $1", [hold.holdId, expiry[0]!.at]);
+
+    // 좌석을 읽는 문장은 등급 가격 표를 함께 읽으므로, 그 표를 잠가 문장을 시작한 채 기다리게 한다
+    const holder = await admin.connect();
+    try {
+      await holder.query("begin");
+      await holder.query("lock table performance_grades in access exclusive mode");
+      const pending = createOrder(hold.holdId, userId);
+      await waitForLockWaiters(1);
+
+      // 만료가 지난 뒤 다른 사용자가 첫 좌석을 선점한다
+      while ((await admin.query("select now() > $1 as passed", [expiry[0]!.at])).rows[0].passed !== true) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      const [other] = await newUsers(admin, 1);
+      const { rows: taken } = await admin.query<{ id: number }>(
+        "insert into holds (user_id, performance_id, expires_at) values ($1, $2, now() + interval '5 minutes') returning id",
+        [other, performanceId],
+      );
+      await admin.query(
+        `update performance_seats set hold_id = $1, hold_expires_at = (select expires_at from holds where id = $1)
+          where performance_id = $2 and seat_id = $3`,
+        [taken[0]!.id, performanceId, hold.seatIds[0]],
+      );
+      await holder.query("commit");
+
+      expect(conflict(await pending).code).toBe("HOLD_EXPIRED");
+    } finally {
+      await holder.query("rollback").catch(() => {});
+      holder.release();
+    }
     expect(await countOrders(hold.holdId)).toBe(0);
   });
 
@@ -284,6 +342,32 @@ describe("POST /holds/:id/orders, GET /orders/:id", () => {
     const [stranger] = await newUsers(admin, 1);
     expect((await getOrder(created.orderId, stranger!)).statusCode).toBe(404);
     expect((await getOrder(999999999, userId)).statusCode).toBe(404);
+  });
+
+  it("주문 조회의 결제는 최신순(같은 시각이면 id 역순)이고, 표는 유효한 것만 보인다", async () => {
+    const { userId, hold } = await newHold(2);
+    const created = OrderView.parse((await createOrder(hold.holdId, userId)).json());
+    const { rows: paid } = await admin.query<{ id: number }>(
+      `insert into payments (order_id, status, amount, idempotency_key, created_at, updated_at)
+       values ($1, 'failed', $2, 'a', now() - interval '10 seconds', now() - interval '10 seconds'),
+              ($1, 'failed', $2, 'b', now() - interval '10 seconds', now() - interval '10 seconds'),
+              ($1, 'refund_pending', $2, 'c', now(), now())
+       returning id`,
+      [created.orderId, created.amount],
+    );
+    await admin.query(
+      `insert into tickets (order_id, performance_id, seat_id, status)
+       values ($1, $2, $3, 'valid'), ($1, $2, $4, 'cancelled')`,
+      [created.orderId, created.performanceId, hold.seatIds[0], hold.seatIds[1]],
+    );
+
+    const view = OrderView.parse((await getOrder(created.orderId, userId)).json());
+    expect(view.payments.map((p) => [p.paymentId, p.status])).toEqual([
+      [paid[2]!.id, "refund_pending"],
+      [paid[1]!.id, "failed"],
+      [paid[0]!.id, "failed"],
+    ]);
+    expect(view.tickets.map((t) => t.seatId)).toEqual([hold.seatIds[0]]);
   });
 
   it("선점이 만료된 pending 주문은 정리 작업 전이라도 cancelled(expired)로 보인다", async () => {

@@ -8,9 +8,24 @@ import { users } from "./db/schema.js";
 import { hashRequest, type IdempotencyScope, withIdempotencyKey } from "./idempotency.js";
 
 describe("멱등 키", () => {
-  const pool = createPool({ connectionString: inject("databaseUrl") });
-  const db = createDb(pool);
-  afterAll(() => pool.end());
+  const url = inject("databaseUrl");
+  const pool = createPool({ connectionString: url });
+  // 잠금을 기다리는 연결만 골라 보려고 이름을 붙인다.
+  const appPool = createPool({ connectionString: url, application_name: "idempotency-test" });
+  const db = createDb(appPool);
+  afterAll(() => Promise.all([pool.end(), appPool.end()]));
+
+  async function waitForLockWaiters(count: number) {
+    for (let i = 0; i < 300; i++) {
+      const { rows } = await pool.query(
+        `select count(*) as n from pg_stat_activity
+          where datname = current_database() and application_name = 'idempotency-test' and wait_event_type = 'Lock'`,
+      );
+      if (rows[0].n === count) return;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error(`잠금을 기다리는 연결이 ${count}개가 되지 않는다`);
+  }
 
   async function newScope(): Promise<IdempotencyScope> {
     const [userId] = await newUsers(pool, 1);
@@ -126,7 +141,7 @@ describe("멱등 키", () => {
     expect(rows).toEqual([{ status: "processing", owner_token: other }]);
   });
 
-  it("오래된 처리 중 키를 두 요청이 함께 넘겨받으려 하면 하나만 넘겨받는다", async () => {
+  it("오래된 처리 중 키를 세 요청이 함께 넘겨받으려 하면 하나만 넘겨받는다", async () => {
     const scope = await newScope();
     await pool.query(
       `insert into idempotency_keys (user_id, route, key, request_hash, owner_token, updated_at)
@@ -139,9 +154,50 @@ describe("멱등 키", () => {
         runs++;
         return { response: { statusCode: 409, body: {} }, keep: "save" };
       });
-    const outcomes = await Promise.all([attempt(), attempt(), attempt()]);
-    expect(runs).toBe(1);
-    expect(outcomes.filter((o) => o.kind === "response" && !o.replayed)).toHaveLength(1);
+    // 다른 연결이 키 행을 잡아, 세 요청이 모두 오래된 키를 본 뒤 넘겨받기 UPDATE에서 기다리게 한다
+    const holder = await pool.connect();
+    try {
+      await holder.query("begin");
+      await holder.query("select 1 from idempotency_keys where user_id = $1 and key = $2 for update", [
+        scope.userId,
+        scope.key,
+      ]);
+      const attempts = [attempt(), attempt(), attempt()];
+      await waitForLockWaiters(3);
+      await holder.query("commit");
+      const outcomes = await Promise.all(attempts);
+      expect(runs).toBe(1);
+      expect(outcomes.filter((o) => o.kind === "response" && !o.replayed)).toHaveLength(1);
+    } finally {
+      await holder.query("rollback").catch(() => {});
+      holder.release();
+    }
+  });
+
+  it("거절 응답을 저장하기 전에 다른 요청이 키를 넘겨받아 끝냈으면, 내 응답은 버리고 그 요청의 응답을 준다", async () => {
+    const scope = await newScope();
+    const saved = await withIdempotencyKey(db, scope, async () => {
+      await pool.query(
+        `update idempotency_keys
+            set owner_token = gen_random_uuid(), status = 'done', response_code = 201, response_body = '{"by":"other"}'
+          where user_id = $1 and key = $2`,
+        [scope.userId, scope.key],
+      );
+      return { response: { statusCode: 409, body: { by: "me" } }, keep: "save" };
+    });
+    expect(saved).toEqual({ kind: "response", response: { statusCode: 201, body: { by: "other" } }, replayed: true });
+
+    // 키를 지우려던 때 넘겨받은 요청이 아직 처리 중이면 처리 중이고, 그 요청의 키는 남는다
+    const released = await newScope();
+    const outcome = await withIdempotencyKey(db, released, async () => {
+      await pool.query("update idempotency_keys set owner_token = gen_random_uuid() where user_id = $1 and key = $2", [
+        released.userId,
+        released.key,
+      ]);
+      return { response: { statusCode: 409, body: {} }, keep: "release" };
+    });
+    expect(outcome).toEqual({ kind: "in_progress" });
+    expect(await keyRow(released)).toEqual([{ status: "processing", response_code: null, response_body: null }]);
   });
 
   it("같은 키를 다른 요청에 쓰면 key_reused이고, 처음 요청의 키는 그대로다", async () => {
