@@ -40,18 +40,22 @@ export async function countLimitSeats(tx: Tx, userId: number, performanceId: num
 // 트랜잭션 안에서 판매 기간·한도·가격을 확인하고 좌석을 선점한다. 실패하면 Rejected를 던져 트랜잭션을 되돌린다.
 // 1. 판매 기간(sales_open_at <= now() < starts_at)이 아니면 SALES_CLOSED. 앱 서버의 시계가 아니라 DB 시계로 SQL에서 판단한다.
 // 2. 한도에 세는 좌석 수와 담은 좌석 수의 합이 1인 한도를 넘으면 HOLD_LIMIT.
-// 3. 담은 좌석 중 이 회차에 등급 가격이 없는 좌석이 있으면 PRICE_MISSING. 이 회차에 없는 좌석은 5에서 SEAT_UNAVAILABLE이 된다.
+// 3. 담은 좌석 중 이 회차에 등급 가격이 없는 좌석이 있으면 PRICE_MISSING. 이 회차에 없는 좌석은 6에서 SEAT_UNAVAILABLE이 된다.
 // 4. 선점 행을 넣는다. 만료 시각은 DB 시계로 정하고, 공연 시작을 넘지 않는다.
 // 5. 한 문장에서 좌석을 좌석 id 순서로 잠그고(locked), 빈 좌석이거나 만료된 선점인 좌석만 바꾼다.
 //    잠금 순서가 요청마다 같아서 여러 좌석을 잠가도 교착이 생기지 않는다.
 //    다른 요청이 쥔 좌석이면 그 트랜잭션이 끝날 때까지 기다린 뒤, 바뀐 행 값으로 조건을 다시 본다.
 // 6. 바뀐 좌석이 담은 수보다 적으면 SEAT_UNAVAILABLE과 바꾸지 못한 좌석. 4의 선점 행도 함께 되돌려진다.
-// 1~3은 좌석을 잠그기 전에 끝난다. 회차 시각과 등급 가격은 지금 바꾸는 경로가 없어 잠그지 않고 읽는다.
+// 1~3은 좌석을 잠그기 전에 끝나서, 거절될 요청이 좌석 잠금을 기다리지 않는다.
+// 회차 시각과 등급 가격은 지금 바꾸는 경로가 없어 잠그지 않고 읽는다. 바꾸는 경로가 생기면 회차 행을 FOR SHARE로 읽어
+// 판매 기간 확인과 만료 시각이 같은 값을 보게 한다.
 // 2의 확인은 같은 사용자의 다른 요청과 겹치면 둘 다 통과할 수 있다. 부르는 쪽이 사용자 단위로 줄을 세워야 한다(holdSeats).
-// now()는 트랜잭션을 시작한 시각이다. 잠금(advisory lock, 좌석)을 오래 기다리는 사이 만료된 선점은 아직 유효해 보여
-// HOLD_LIMIT이나 SEAT_UNAVAILABLE이 날 수 있고, 새 선점의 유지 시간도 그만큼 짧아진다. 판매가 열리는 순간 잠금을 기다린
-// 요청은 NOT_OPEN이 날 수 있다. 모두 좌석을 더 주는 쪽으로는 틀리지 않는다.
-// 응답의 serverTime도 이 시각이라 잠금을 기다린 만큼 실제보다 이르다(화면이 시계 차이를 보정하는 값, DESIGN 6.2).
+// now()는 트랜잭션을 시작한 시각이다. 잠금(advisory lock, 좌석)을 오래 기다리면 다음이 생긴다. 모두 좌석을 더 주는 쪽으로는 틀리지 않는다.
+// - 그 사이 만료된 선점이 아직 유효해 보여 HOLD_LIMIT이나 SEAT_UNAVAILABLE이 날 수 있다.
+// - 새 선점의 유지 시간이 그만큼 짧아진다. 공연 시작 직전이면 이미 지난 만료 시각(starts_at)의 선점을 받을 수 있다.
+//   그 좌석은 곧바로 다른 사람이 잡을 수 있고, 결제 확정은 만료를 statement_timestamp()로 보므로 팔리지 않는다(DESIGN 6.2).
+// - 판매가 열리는 순간이면 NOT_OPEN이 날 수 있다.
+// - 응답의 serverTime도 이 시각이라 실제보다 이르다(화면이 시계 차이를 보정하는 값, DESIGN 6.2).
 export async function holdWithinTx(tx: Tx, { userId, performanceId, seatIds }: HoldInput): Promise<HoldSuccess> {
   // tx.execute는 timestamptz를 문자열로 돌려주므로 쿼리 빌더로 읽는다. now()도 timestamptz 열의 변환으로 Date가 된다.
   const [performance] = await tx
@@ -83,6 +87,7 @@ export async function holdWithinTx(tx: Tx, { userId, performanceId, seatIds }: H
   `);
   if (unpriced.length > 0) throw new Rejected({ code: "PRICE_MISSING", seatIds: unpriced.map((r) => r.seat_id) });
 
+  // 공연 시작은 위에서 읽은 Date를 넘기지 않고 SQL에서 다시 읽는다. Date는 마이크로초를 버려 만료가 공연 시작과 어긋난다.
   const [hold] = await tx
     .insert(holds)
     .values({

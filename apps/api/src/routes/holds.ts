@@ -26,7 +26,7 @@ function conflictBody(failure: HoldFailure): HoldConflict {
       };
     case "HOLD_LIMIT":
       return {
-        error: `회차당 1인 ${failure.limit}석까지 선점할 수 있습니다(구매 포함). 지금 선점 ${failure.heldSeats}석, 구매 ${failure.purchasedSeats}석`,
+        error: `선점과 구매를 합쳐 회차당 1인 ${failure.limit}석까지입니다. 지금 선점 ${failure.heldSeats}석, 구매 ${failure.purchasedSeats}석`,
         code: failure.code,
         limit: failure.limit,
         heldSeats: failure.heldSeats,
