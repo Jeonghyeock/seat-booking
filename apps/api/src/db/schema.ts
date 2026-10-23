@@ -135,6 +135,8 @@ export const performanceSeats = pgTable(
 );
 
 // ── 3단계: 주문, 결제, 표, 멱등 키(DESIGN 5장·6.2) ──
+// 부분 인덱스(WHERE status = '…')는 질의에 그 상태 값이 SQL 글자로 적혀 있어야 쓰인다.
+// 상태를 파라미터($1)로 넘기면 일반 계획(generic plan)에서는 인덱스 조건과 맞는지 알 수 없어 쓰지 못한다(스키마 리뷰 O4).
 
 export const ORDER_STATUSES = ["pending", "paid", "cancelled"] as const;
 export const CANCEL_REASONS = ["user", "expired"] as const;
@@ -238,9 +240,10 @@ export const payments = pgTable(
   ],
 );
 
-export const WEBHOOK_RESULTS = ["processed", "ignored", "unmatched"] as const;
+export const WEBHOOK_RESULTS = ["received", "processed", "ignored", "unmatched"] as const;
 
-// 받은 웹훅(inbox). 처리와 같은 트랜잭션에서 넣는다. 처리가 되돌려지면 이 행도 사라져, 결제사가 다시 보낼 때 다시 처리한다.
+// 받은 웹훅(inbox). 처리와 같은 트랜잭션에서 먼저 넣고(received), 처리한 뒤 결과를 적는다(processed·ignored·unmatched).
+// 처리가 되돌려지면 이 행도 사라져, 결제사가 다시 보낼 때 다시 처리한다. 커밋된 received는 결과를 적지 않은 버그다.
 // payment_id에는 외래 키를 두지 않는다. 모르는 결제의 웹훅(unmatched)도 남겨야 하고,
 // 외래 키 확인 잠금(FOR KEY SHARE)이 결제 행 갱신과 부딪히지 않게 하려는 것이다(DESIGN 6.2).
 export const paymentWebhooks = pgTable(
@@ -249,16 +252,16 @@ export const paymentWebhooks = pgTable(
     eventId: text("event_id").primaryKey(),
     paymentId: bigint("payment_id", { mode: "number" }),
     type: text("type").notNull(),
-    result: text("result", { enum: WEBHOOK_RESULTS }).notNull(),
+    result: text("result", { enum: WEBHOOK_RESULTS }).notNull().default("received"),
     body: jsonb("body").notNull(),
     receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [check("payment_webhooks_result_valid", sql`${t.result} in ('processed', 'ignored', 'unmatched')`)],
+  (t) => [check("payment_webhooks_result_valid", sql`${t.result} in ('received', 'processed', 'ignored', 'unmatched')`)],
 );
 
 export const TICKET_STATUSES = ["valid", "cancelled"] as const;
 
-// 결제 확정 때 좌석마다 한 장. 3단계에는 valid만 생긴다(결제 후 취소가 없다, DESIGN 10장 22).
+// 결제 확정 때 좌석마다 한 장. 3단계에는 valid만 생긴다(결제 후 취소가 없다, DESIGN 10장 22). cancelled는 결제 후 취소가 생길 때 쓴다.
 // 한 좌석에 유효한 표는 하나다(부분 unique). 앱 코드에 버그가 있어도 DB가 두 번 판매를 거부한다(DESIGN 6.1의 ④).
 export const tickets = pgTable(
   "tickets",
@@ -278,6 +281,12 @@ export const tickets = pgTable(
       name: "tickets_performance_seat_fk",
       columns: [t.performanceId, t.seatId],
       foreignColumns: [performanceSeats.performanceId, performanceSeats.seatId],
+    }),
+    // 주문에 있는 좌석만 표가 된다. order_items는 만든 뒤 바꾸지 않으므로 이 외래 키 확인이 다른 잠금과 부딪히지 않는다.
+    foreignKey({
+      name: "tickets_order_item_fk",
+      columns: [t.orderId, t.seatId],
+      foreignColumns: [orderItems.orderId, orderItems.seatId],
     }),
     check("tickets_status_valid", sql`${t.status} in ('valid', 'cancelled')`),
     uniqueIndex("tickets_one_valid_per_seat").on(t.performanceId, t.seatId).where(sql`${t.status} = 'valid'`),
@@ -310,11 +319,9 @@ export const idempotencyKeys = pgTable(
     primaryKey({ columns: [t.userId, t.route, t.key] }),
     check("idempotency_keys_status_valid", sql`${t.status} in ('processing', 'done')`),
     check("idempotency_keys_key_length", sql`char_length(${t.key}) between 1 and 255`),
-    // 끝난 키에만 응답이 있다.
-    check(
-      "idempotency_keys_response_matches_status",
-      sql`(${t.status} = 'done') = (${t.responseCode} is not null and ${t.responseBody} is not null)`,
-    ),
+    // 끝난 키에만 응답이 있고, 응답은 상태 코드와 본문이 함께 있다.
+    check("idempotency_keys_response_matches_status", sql`(${t.status} = 'done') = (${t.responseCode} is not null)`),
+    check("idempotency_keys_response_fields_together", sql`(${t.responseCode} is null) = (${t.responseBody} is null)`),
     // 24시간 지난 키를 지운다(DESIGN 6.2 정리 5).
     index("idempotency_keys_created_idx").on(t.createdAt),
   ],

@@ -137,8 +137,8 @@
 |---|---|---|
 | `orders` | pending, paid, cancelled | pending → paid(결제 확정), pending → cancelled(사용자 취소, 선점 만료). paid·cancelled는 끝 상태 |
 | `payments` | requested, succeeded, failed, refund_pending, refunded, refund_failed | requested → succeeded(확정함)·failed(실패 웹훅, 대사)·refund_pending(성공 웹훅이 왔지만 주문을 확정할 수 없음), failed → refund_pending(failed 뒤에 성공 웹훅이 옴. 돈을 받았으니 돌려준다), refund_pending → refunded(환불 작업)·refund_failed(다섯 번 실패), refund_failed → refund_pending(관리자가 다시 시도) |
-| `payment_webhooks` | processed, ignored, unmatched | 받은 웹훅을 처리와 같은 트랜잭션에서 넣는다(이벤트 id unique). 처리가 되돌려지면 이 행도 사라져, 재전송 때 다시 처리한다 |
-| `tickets` | valid | 결제 확정 때 좌석마다 한 장 |
+| `payment_webhooks` | received, processed, ignored, unmatched | 받은 웹훅을 처리와 같은 트랜잭션에서 먼저 넣고(received, 이벤트 id unique) 처리한 뒤 결과를 적는다. 처리가 되돌려지면 이 행도 사라져, 재전송 때 다시 처리한다. 커밋된 received는 결과를 적지 않은 버그다 |
+| `tickets` | valid(cancelled는 결제 후 취소가 생기면) | 결제 확정 때 좌석마다 한 장. 주문에 있는 좌석만(`order_items` 외래 키) |
 
 초안의 주문 상태 `refunded`는 결제로 옮겼다. 확정하지 못해 돌려주는 돈은 주문이 아니라 그 결제의 일이고, 결제 후 취소(환불 요청)는 v1에서 하지 않는다(10장 22).
 
