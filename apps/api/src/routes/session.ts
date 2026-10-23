@@ -12,6 +12,8 @@ declare module "fastify" {
     userRoutes: { method: string; url: string }[];
     // 등록된 모든 경로(HEAD 빼고). 테스트가 상태를 바꾸는 경로는 웹훅 말고 모두 CSRF를 확인하는지 본다(범위 밖에 잘못 둔 경로를 잡는다).
     allRoutes: { method: string; url: string }[];
+    // 관리자 범위(/admin)에 등록된 경로. 테스트가 모두 로그인하지 않았으면 401, 손님이면 403인지 본다.
+    adminRoutes: { method: string; url: string }[];
   }
 }
 
@@ -67,4 +69,12 @@ export function csrfGuard(config: AuthConfig) {
       request.headers[CSRF_HEADER] === CSRF_HEADER_VALUE;
     if (!allowed) return reply.code(403).send({ error: "요청을 거절했습니다", code: "CSRF_REJECTED" });
   };
+}
+
+// 관리자 경로의 onRequest 훅. requireUser 뒤에 건다. 관리자가 아니면 403 FORBIDDEN이다(DESIGN 6.3 역할).
+// 역할은 요청마다 users에서 읽으므로(findSessionUser) 내리면 바로 적용된다.
+export async function requireAdmin(request: FastifyRequest, reply: FastifyReply) {
+  if (currentUser(request).role !== "admin") {
+    return reply.code(403).send({ error: "관리자만 할 수 있습니다", code: "FORBIDDEN" });
+  }
 }

@@ -49,11 +49,20 @@ npm run dev                               # http://127.0.0.1:3001
 | `POST /orders/:id/cancel` | 결제 전 주문을 취소하고 좌석을 푼다. 이미 취소됐으면 같은 결과, 결제가 끝난 주문은 409. 결제 확인 중에 취소하고 그 결제가 성공하면 환불로 간다 |
 | `POST /orders/:id/payments` | 가짜 결제사에 결제를 요청한다(202, 결과는 웹훅으로). `Idempotency-Key` 필수. 본문 `scenario`로 상황(성공·실패·중복·순서 뒤바뀜·먼저 옴·유실)을 고른다. 결제할 수 없는 주문·진행 중인 결제는 409, 결제사 장애는 503 |
 | `POST /webhooks/fake-pay` | 가짜 결제사의 결과 웹훅. 서명(`X-Fake-Signature`)이 틀리면 401, 맞으면 중복·모르는 웹훅도 200. 성공이면 좌석을 팔고 표를 만든다 |
+| `GET /admin/performances/:id/sales` | 관리자. 회차 판매 현황(좌석·주문·매출·결제 상태별 수, 한 스냅샷) |
+| `GET /admin/payments?status=refund_failed` | 관리자. 환불이 다섯 번 실패한 결제(최근 것부터 100개와 `hasMore`) |
+| `POST /admin/payments/:id/retry-refund` | 관리자. 환불 실패 결제를 다시 환불 대기로 돌린다(다음 정리 작업이 환불). 다른 상태면 409 |
 
 요청과 응답은 `packages/shared`의 zod 스키마로 검증한다.
 
 서버는 10초마다 정리 작업을 돈다: 만료된 선점 좌석 풀기, 선점이 끝난 주문 취소, 환불, 웹훅을 잃은 결제 대사(결제사에 다시 묻기), 24시간 지난 멱등 키 지우기.
 
 선점·주문·결제·취소와 내 선점 조회는 로그인한 사용자만 부를 수 있다. 사용자는 세션 쿠키로 가린다(DESIGN 6.3).
+
+`/admin/*`은 관리자만 부른다(로그인하지 않았으면 401, 손님이면 403). 관리자는 가입한 계정을 명령으로 올린다. 올린 사용자는 다시 로그인해야 한다.
+
+```sh
+npm run admin:promote -w @seat-booking/api -- you@example.com
+```
 
 상태를 바꾸는 요청(POST)에는 `X-Requested-With: seat-booking` 헤더가 있어야 한다(CSRF). 브라우저가 Origin을 보내면 `APP_ORIGIN`에 있어야 한다. 손으로 부를 때는 이 헤더와 로그인 응답의 쿠키를 붙인다. 가입은 IP당, 로그인은 IP+이메일당 분당 10회까지다(로그인은 IP 하나로도 분당 100회). 리버스 프록시 뒤에서 띄우면 `TRUST_PROXY`에 프록시 주소를 적어야 IP가 맞다.

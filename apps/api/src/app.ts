@@ -6,12 +6,13 @@ import { serializerCompiler, validatorCompiler, type ZodTypeProvider } from "fas
 import type pg from "pg";
 import { createDb } from "./db/client.js";
 import { FakePaymentProvider, SIGNATURE_HEADER } from "./fake-pay.js";
+import { adminRoutes } from "./routes/admin.js";
 import { authRoutes, meRoutes } from "./routes/auth.js";
 import { holdRoutes } from "./routes/holds.js";
 import { orderRoutes } from "./routes/orders.js";
 import { paymentRoutes } from "./routes/payments.js";
 import { performanceRoutes } from "./routes/performances.js";
-import { type AuthConfig, csrfGuard, requireUser } from "./routes/session.js";
+import { type AuthConfig, csrfGuard, requireAdmin, requireUser } from "./routes/session.js";
 import { webhookRoutes } from "./routes/webhooks.js";
 
 // paymentProvider를 넘기지 않으면 무작위 비밀로 새로 만든다. 서명하는 쪽과 확인하는 쪽이 같은 프로세스라 비밀을 밖에서 받을 필요가 없다.
@@ -35,6 +36,7 @@ export function buildApp(
   app.decorateRequest("user", null);
   app.decorate("userRoutes", [] as { method: string; url: string }[]);
   app.decorate("allRoutes", [] as { method: string; url: string }[]);
+  app.decorate("adminRoutes", [] as { method: string; url: string }[]);
   app.addHook("onRoute", (route) => {
     for (const method of [route.method].flat()) if (method !== "HEAD") app.allRoutes.push({ method, url: route.url });
   });
@@ -99,6 +101,18 @@ export function buildApp(
       userScope.register(orderRoutes, { db });
       userScope.register(paymentRoutes, { db, provider: paymentProvider });
     });
+    // 관리자 경로(/admin). 세션 훅 뒤에 역할 훅이 관리자가 아니면 403이다. 응답 순서는 CSRF 403 → 401 → 관리자 아님 403이다.
+    web.register(
+      async (adminScope) => {
+        adminScope.addHook("onRequest", requireUser(db, authConfig));
+        adminScope.addHook("onRequest", requireAdmin);
+        adminScope.addHook("onRoute", (route) => {
+          for (const method of [route.method].flat()) if (method !== "HEAD") app.adminRoutes.push({ method, url: route.url });
+        });
+        adminScope.register(adminRoutes, { db });
+      },
+      { prefix: "/admin" },
+    );
   });
   // 웹훅은 세션·CSRF 범위 밖이다. 결제사 서명으로 지킨다.
   app.register(webhookRoutes, { db, provider: paymentProvider });

@@ -59,6 +59,7 @@ describe("CSRF", () => {
     await app.ready();
     const writes = app.allRoutes.filter((route) => ["POST", "PUT", "PATCH", "DELETE"].includes(route.method));
     expect(writes.map((route) => `${route.method} ${route.url}`).sort()).toEqual([
+      "POST /admin/payments/:id/retry-refund",
       "POST /auth/login",
       "POST /auth/logout",
       "POST /auth/signup",
