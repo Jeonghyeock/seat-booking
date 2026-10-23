@@ -57,6 +57,27 @@ describe("샘플 시드", () => {
     expect(await venuesNamed("가격 누락 홀")).toBe(0);
   });
 
+  it("좌석이 없는 등급에 가격이 있어도 넣기 전에 실패한다", async () => {
+    const broken = structuredClone(data);
+    broken.venue.name = "모르는 등급 홀";
+    broken.shows[0]!.performances[0]!.prices.X = 1000;
+    await expect(seed(db, broken)).rejects.toThrow(/좌석이 없는 등급: X/);
+    expect(await venuesNamed("모르는 등급 홀")).toBe(0);
+  });
+
+  it("한 문장의 파라미터 한도(65,535개)를 넘는 큰 공연장도 나눠 넣는다", async () => {
+    const big = structuredClone(data);
+    big.venue = { name: `큰 홀 ${randomUUID()}`, rows: [{ section: "1층", row: "A", seats: 14_000, grade: "R" }] };
+    big.shows = [{ ...big.shows[0]!, performances: [{ ...big.shows[0]!.performances[0]!, prices: { R: 10000 } }] }];
+    const { venueId, performanceIds } = await seed(db, big);
+    const { rows } = await pool.query(
+      `select (select count(*) from seats where venue_id = $1) as seats,
+              (select count(*) from performance_seats where performance_id = $2) as stock`,
+      [venueId, performanceIds[0]],
+    );
+    expect(rows[0]).toEqual({ seats: 14_000, stock: 14_000 });
+  });
+
   it("넣는 도중에 실패하면 앞서 넣은 공연장·좌석까지 되돌린다", async () => {
     // 공연장과 좌석을 넣은 뒤, 회차를 넣을 때 check 제약(판매 시작 < 판매 종료)에 걸린다
     const broken = structuredClone(data);

@@ -360,27 +360,43 @@ export type AdminShows = z.infer<typeof AdminShows>;
 
 export const PRICE_MAX = 10_000_000;
 
-// 회차 등록 본문. 작품은 있는 것({ id })이나 새 제목({ title })이다. 판매 종료는 필수다(화면이 공연 3시간 전을 미리 채운다).
-// 가격은 그 공연장 좌석의 등급마다 하나씩, 0 이상 1천만 원 이하 정수다. 알 수 없는 키는 버린다.
+// 등급 이름. 시드의 좌석 배치와 회차 등록의 가격이 같은 규칙을 쓴다.
+export const GradeName = z.string().min(1).max(50);
+
+// 회차 시각. 오프셋이 있는 ISO 8601(초까지, 예: 2027-03-01T19:00:00+09:00)이고 2000~2099년이다.
+// 0년 근처 같은 값은 PostgreSQL이 범위 밖으로 거절해 500이 되므로 먼저 막는다.
+const PerformanceTime = z.iso.datetime({ offset: true }).refine((value) => {
+  const time = Date.parse(value);
+  return time >= Date.UTC(2000, 0, 1) && time < Date.UTC(2100, 0, 1);
+}, "2000~2099년 사이의 시각이어야 합니다");
+
+// 회차 등록 본문. 작품은 있는 것({ id })이나 새 제목({ title }) 중 하나만 보낸다. 둘 다 오면 400이다
+// (모르는 키를 버리면 { id: "5", title }이 새 작품으로, { id: 5, title }이 title을 버린 채 등록된다).
+// 판매 종료는 필수다(화면이 공연 3시간 전을 미리 채운다). 가격은 그 공연장 좌석의 등급마다 하나씩, 0 이상 1천만 원 이하 정수다.
+// 바깥의 알 수 없는 키는 버린다.
 export const CreatePerformance = z.object({
   show: z.union([
-    z.object({ id: z.number().int().positive() }),
-    z.object({ title: z.string().trim().min(1).max(200) }),
+    z.strictObject({ id: z.number().int().positive() }),
+    z.strictObject({ title: z.string().trim().min(1).max(200) }),
   ]),
   venueId: z.number().int().positive(),
-  startsAt: z.iso.datetime({ offset: true }),
-  salesOpenAt: z.iso.datetime({ offset: true }),
-  salesCloseAt: z.iso.datetime({ offset: true }),
-  prices: z.record(z.string().min(1).max(50), z.number().int().min(0).max(PRICE_MAX)),
+  startsAt: PerformanceTime,
+  salesOpenAt: PerformanceTime,
+  salesCloseAt: PerformanceTime,
+  prices: z.record(GradeName, z.number().int().min(0).max(PRICE_MAX)),
 });
 export type CreatePerformance = z.infer<typeof CreatePerformance>;
 
 // 회차 등록 422: 등록할 수 없는 이유를 모두 준다(폼이 한 번에 보인다).
-// SALES_WINDOW_INVALID: 판매 시작 < 판매 종료 <= 공연 시작이 아니다. MISSING_GRADES·UNKNOWN_GRADES: 가격의 등급이 그 공연장 좌석의 등급과 다르다.
+// VENUE_NOT_FOUND: 없는(또는 좌석 배치가 없는) 공연장. SHOW_TITLE_EXISTS: 같은 제목의 작품이 있다(그 작품 id로 다시 보낸다).
+// SALES_WINDOW_INVALID: 판매 시작 < 판매 종료 <= 공연 시작이 아니다. SALES_CLOSE_PASSED: 판매 종료가 이미 지났다(DB 시계).
+// MISSING_GRADES·UNKNOWN_GRADES: 가격의 등급이 그 공연장 좌석의 등급과 다르다.
 export const PerformanceProblem = z.discriminatedUnion("reason", [
   z.object({ reason: z.literal("VENUE_NOT_FOUND") }),
   z.object({ reason: z.literal("SHOW_NOT_FOUND") }),
+  z.object({ reason: z.literal("SHOW_TITLE_EXISTS"), showId: z.number().int().positive() }),
   z.object({ reason: z.literal("SALES_WINDOW_INVALID") }),
+  z.object({ reason: z.literal("SALES_CLOSE_PASSED") }),
   z.object({ reason: z.literal("MISSING_GRADES"), grades: z.array(z.string()) }),
   z.object({ reason: z.literal("UNKNOWN_GRADES"), grades: z.array(z.string()) }),
 ]);

@@ -50,7 +50,7 @@ npm run dev                               # http://127.0.0.1:3001
 | `POST /orders/:id/payments` | 가짜 결제사에 결제를 요청한다(202, 결과는 웹훅으로). `Idempotency-Key` 필수. 본문 `scenario`로 상황(성공·실패·중복·순서 뒤바뀜·먼저 옴·유실)을 고른다. 결제할 수 없는 주문·진행 중인 결제는 409, 결제사 장애는 503 |
 | `POST /webhooks/fake-pay` | 가짜 결제사의 결과 웹훅. 서명(`X-Fake-Signature`)이 틀리면 401, 맞으면 중복·모르는 웹훅도 200. 성공이면 좌석을 팔고 표를 만든다 |
 | `GET /admin/venues`, `GET /admin/shows` | 관리자. 공연장과 등급별 좌석 수, 작품 목록(회차 등록 폼용) |
-| `POST /admin/performances` | 관리자. 회차 등록(작품 id 또는 새 제목, 공연장, 공연 시작, 판매 시작·종료, 등급별 가격). 등록할 수 없는 이유는 모아서 422, 같은 공연장·같은 시각이면 409 |
+| `POST /admin/performances` | 관리자. 회차 등록(작품 id 또는 새 제목, 공연장, 공연 시작, 판매 시작·종료, 등급별 가격). 등록할 수 없는 이유(등급, 판매 기간, 지난 판매 종료, 같은 제목 등)는 모아서 422, 같은 공연장·같은 시각이면 409 |
 | `GET /admin/performances/:id/sales` | 관리자. 회차 판매 현황(좌석·주문·매출·결제 상태별 수, 한 스냅샷) |
 | `GET /admin/payments?status=refund_failed` | 관리자. 환불이 다섯 번 실패한 결제(최근 것부터 100개와 `hasMore`) |
 | `POST /admin/payments/:id/retry-refund` | 관리자. 환불 실패 결제를 다시 환불 대기로 돌린다(다음 정리 작업이 환불). 다른 상태면 409 |

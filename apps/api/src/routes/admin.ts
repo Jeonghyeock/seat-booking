@@ -37,7 +37,7 @@ export const adminRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db }
     listShows(db),
   );
 
-  // 회차 등록. 누가 어느 회차를 만들었는지 로그에 남긴다.
+  // 회차 등록. 누가 등록했고 결과가 어땠는지 로그에 남긴다.
   app.post(
     "/performances",
     {
@@ -55,7 +55,9 @@ export const adminRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db }
     },
     async (request, reply) => {
       const result = await createPerformance(db, request.body);
+      const adminId = currentUser(request).id;
       if (!result.ok) {
+        request.log.info({ adminId, result }, "관리자: 회차 등록 거절");
         if (result.code === "PERFORMANCE_EXISTS") {
           return reply.code(409).send({
             error: "같은 공연장·같은 공연 시작의 회차가 이미 있습니다",
@@ -65,7 +67,7 @@ export const adminRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db }
         }
         return reply.code(422).send({ error: "회차를 등록할 수 없습니다", code: result.code, problems: result.problems });
       }
-      request.log.info({ adminId: currentUser(request).id, performanceId: result.performance.id }, "관리자: 회차 등록");
+      request.log.info({ adminId, performanceId: result.performance.id }, "관리자: 회차 등록");
       return reply.code(201).send(result.performance);
     },
   );
