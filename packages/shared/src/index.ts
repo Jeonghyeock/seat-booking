@@ -199,3 +199,45 @@ export const CreateOrderConflict = z.discriminatedUnion("code", [
   RequestInProgress,
 ]);
 export type CreateOrderConflict = z.infer<typeof CreateOrderConflict>;
+
+// 결제 요청 본문. 비어 있으면 기본값이다(success, 웹훅까지 1초).
+export const PaymentRequest = z
+  .object({
+    scenario: PaymentScenario.default("success"),
+    delayMs: z.number().int().min(0).max(60_000).default(1000),
+  })
+  .prefault({});
+export type PaymentRequest = z.infer<typeof PaymentRequest>;
+
+// 결제 요청 202. 결과는 웹훅으로 오므로 status는 보통 requested다. 웹훅이 먼저 왔으면 succeeded일 수 있고,
+// 결제사가 무효로 거절했으면(대사가 이미 failed로 바꿈) failed다. 화면은 주문 조회로 결과를 기다린다.
+export const PaymentAccepted = z.object({
+  orderId: z.number().int().positive(),
+  paymentId: z.number().int().positive(),
+  status: PaymentStatus,
+});
+export type PaymentAccepted = z.infer<typeof PaymentAccepted>;
+
+// 결제 요청의 409.
+// ORDER_NOT_PAYABLE: 결제할 수 없는 주문이다(PAID·CANCELLED·HOLD_EXPIRED·TOO_CLOSE_TO_EXPIRY). 예매 내역이나 좌석 다시 고르기로 간다.
+// PAYMENT_IN_PROGRESS: 이 주문의 다른 결제(paymentId)를 확인하고 있다. 다시 보내지 말고 결과를 기다린다.
+export const PaymentConflict = z.discriminatedUnion("code", [
+  z.object({
+    error: z.string(),
+    code: z.literal("ORDER_NOT_PAYABLE"),
+    orderId: z.number().int().positive(),
+    reason: z.enum(["PAID", "CANCELLED", "HOLD_EXPIRED", "TOO_CLOSE_TO_EXPIRY"]),
+  }),
+  z.object({ error: z.string(), code: z.literal("PAYMENT_IN_PROGRESS"), paymentId: z.number().int().positive() }),
+  RequestInProgress,
+]);
+export type PaymentConflict = z.infer<typeof PaymentConflict>;
+
+// 결제사에 닿지 않았다(503, Retry-After). 같은 키로 다시 보내면 같은 결제(paymentId)를 다시 묻으므로 이중 결제가 없다.
+// 화면은 실패가 아니라 "결제 확인 중"으로 보인다.
+export const PaymentProviderUnavailable = z.object({
+  error: z.string(),
+  code: z.literal("PAYMENT_PROVIDER_UNAVAILABLE"),
+  paymentId: z.number().int().positive(),
+});
+export type PaymentProviderUnavailable = z.infer<typeof PaymentProviderUnavailable>;

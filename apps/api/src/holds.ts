@@ -142,15 +142,20 @@ export async function toHoldResult(run: () => Promise<HoldSuccess>): Promise<Hol
   }
 }
 
+// 같은 사용자·회차의 선점과 결제 확정을 줄 세우는 트랜잭션 단위 advisory lock(DESIGN 6.1, 6.2 결제 확정 4).
+// 팔린 좌석도 1인 한도에 들어가므로, 만료된 선점을 sold로 바꾸는 확정도 선점과 같은 줄에 선다.
+// 해시가 겹치면 다른 사용자끼리 기다릴 뿐 결과는 틀리지 않는다.
+export async function lockUserPerformance(tx: Tx, userId: number, performanceId: number) {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`hold:${userId}:${performanceId}`}, 0))`);
+}
+
 // 담은 좌석을 전부 선점하거나 하나도 선점하지 않는다(DESIGN 6.1).
 // 같은 사용자·회차의 요청은 트랜잭션 단위 advisory lock으로 줄을 세운다. 앞 요청이 커밋한 뒤에야 다음 요청이 좌석 수를 센다(C6).
 // 이 잠금은 좌석 잠금보다 먼저 잡는다. 잠금 순서가 "사용자 → 좌석 id 순" 하나뿐이라 교착이 생기지 않는다.
 export function holdSeats(db: Db, input: HoldInput): Promise<HoldResult> {
   return toHoldResult(() =>
     db.transaction(async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`hold:${input.userId}:${input.performanceId}`}, 0))`,
-      );
+      await lockUserPerformance(tx, input.userId, input.performanceId);
       return holdWithinTx(tx, input);
     }),
   );

@@ -42,6 +42,8 @@ npm run dev                               # http://127.0.0.1:3001
 | `GET /performances/:id/me` | 이 회차에서 내 유효한 선점(좌석·만료 시각·붙은 주문)과 한도(선점·구매·남은 수), 서버 시각 |
 | `POST /holds/:id/orders` | 선점으로 주문(pending)을 만든다. 좌석과 그때의 가격을 복사한다. `Idempotency-Key` 필수(같은 키로 다시 보내면 처음 응답). 선점 만료·이미 있는 주문·가격 없는 좌석은 409 |
 | `GET /orders/:id` | 주문(좌석·가격·결제·표·결제 마감·서버 시각). 남의 주문은 404 |
+| `POST /orders/:id/payments` | 가짜 결제사에 결제를 요청한다(202, 결과는 웹훅으로). `Idempotency-Key` 필수. 본문 `scenario`로 상황(성공·실패·중복·순서 뒤바뀜·먼저 옴·유실)을 고른다. 결제할 수 없는 주문·진행 중인 결제는 409, 결제사 장애는 503 |
+| `POST /webhooks/fake-pay` | 가짜 결제사의 결과 웹훅. 서명(`X-Fake-Signature`)이 틀리면 401, 맞으면 중복·모르는 웹훅도 200. 성공이면 좌석을 팔고 표를 만든다 |
 
 요청과 응답은 `packages/shared`의 zod 스키마로 검증한다.
 
