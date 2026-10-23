@@ -1,21 +1,22 @@
 import {
+  AuthError,
   CreateOrderConflict,
   ErrorResponse,
   HoldParams,
+  IdempotencyHeaders,
   IdempotencyKeyReused,
-  IdempotentUserHeaders,
   OrderNotCancellable,
   OrderParams,
   OrderView,
-  UserHeaders,
 } from "@seat-booking/shared";
 import { and, eq } from "drizzle-orm";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import type { Db } from "../db/client.js";
-import { holds, orders, users } from "../db/schema.js";
+import { holds, orders } from "../db/schema.js";
 import { hashRequest, withIdempotencyKey } from "../idempotency.js";
 import { type CreateOrderFailure, cancelOrder, createOrder, loadOrderView } from "../orders.js";
 import { sendIdempotent } from "./idempotent-reply.js";
+import { currentUser } from "./session.js";
 
 function conflictBody(failure: CreateOrderFailure): CreateOrderConflict {
   switch (failure.code) {
@@ -38,10 +39,11 @@ export const orderRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db }
     {
       schema: {
         params: HoldParams,
-        headers: IdempotentUserHeaders,
+        headers: IdempotencyHeaders,
         response: {
           201: OrderView,
-          401: ErrorResponse,
+          401: AuthError,
+          403: AuthError,
           404: ErrorResponse,
           409: CreateOrderConflict,
           422: IdempotencyKeyReused,
@@ -50,11 +52,9 @@ export const orderRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db }
     },
     async (request, reply) => {
       const holdId = request.params.id;
-      const userId = request.headers["x-user-id"];
+      const userId = currentUser(request).id;
 
-      // 없는 사용자와 남의 선점은 멱등 키를 잡기 전에 거른다. 키 행은 사용자를 외래 키로 가리키고, 이 확인은 아무것도 바꾸지 않는다.
-      const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
-      if (!user) return reply.code(401).send({ error: "없는 사용자입니다" });
+      // 남의 선점은 멱등 키를 잡기 전에 거른다. 이 확인은 아무것도 바꾸지 않는다.
       const [hold] = await db
         .select({ id: holds.id })
         .from(holds)
@@ -84,16 +84,13 @@ export const orderRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db }
     {
       schema: {
         params: OrderParams,
-        headers: UserHeaders,
-        response: { 200: OrderView, 401: ErrorResponse, 404: ErrorResponse, 409: OrderNotCancellable },
+        response: { 200: OrderView, 401: AuthError, 403: AuthError, 404: ErrorResponse, 409: OrderNotCancellable },
       },
     },
     async (request, reply) => {
       const orderId = request.params.id;
-      const userId = request.headers["x-user-id"];
+      const userId = currentUser(request).id;
 
-      const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
-      if (!user) return reply.code(401).send({ error: "없는 사용자입니다" });
       const [order] = await db
         .select({ id: orders.id })
         .from(orders)
@@ -115,16 +112,13 @@ export const orderRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db }
     {
       schema: {
         params: OrderParams,
-        headers: UserHeaders,
-        response: { 200: OrderView, 401: ErrorResponse, 404: ErrorResponse },
+        response: { 200: OrderView, 401: AuthError, 403: AuthError, 404: ErrorResponse },
       },
     },
     async (request, reply) => {
       const orderId = request.params.id;
-      const userId = request.headers["x-user-id"];
+      const userId = currentUser(request).id;
 
-      const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
-      if (!user) return reply.code(401).send({ error: "없는 사용자입니다" });
       // 남의 주문도 없는 주문과 같이 404다.
       const [order] = await db
         .select({ id: orders.id })

@@ -1,7 +1,8 @@
 import {
+  AuthError,
   ErrorResponse,
+  IdempotencyHeaders,
   IdempotencyKeyReused,
-  IdempotentUserHeaders,
   OrderParams,
   PaymentAccepted,
   PaymentConflict,
@@ -11,11 +12,12 @@ import {
 import { and, eq } from "drizzle-orm";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import type { Db } from "../db/client.js";
-import { orders, users } from "../db/schema.js";
+import { orders } from "../db/schema.js";
 import type { FakePaymentProvider } from "../fake-pay.js";
 import { hashRequest, type WorkResult, withIdempotencyKey } from "../idempotency.js";
 import { type NotPayableReason, requestPayment } from "../payments.js";
 import { sendIdempotent } from "./idempotent-reply.js";
+import { currentUser } from "./session.js";
 
 const NOT_PAYABLE_MESSAGES: Record<NotPayableReason, string> = {
   PAID: "이미 결제한 주문입니다",
@@ -33,11 +35,12 @@ export const paymentRoutes: FastifyPluginAsyncZod<{ db: Db; provider: FakePaymen
     {
       schema: {
         params: OrderParams,
-        headers: IdempotentUserHeaders,
+        headers: IdempotencyHeaders,
         body: PaymentRequest,
         response: {
           202: PaymentAccepted,
-          401: ErrorResponse,
+          401: AuthError,
+          403: AuthError,
           404: ErrorResponse,
           409: PaymentConflict,
           422: IdempotencyKeyReused,
@@ -47,13 +50,11 @@ export const paymentRoutes: FastifyPluginAsyncZod<{ db: Db; provider: FakePaymen
     },
     async (request, reply) => {
       const orderId = request.params.id;
-      const userId = request.headers["x-user-id"];
+      const userId = currentUser(request).id;
       const key = request.headers["idempotency-key"];
       const { scenario, delayMs } = request.body;
 
-      // 없는 사용자와 남의 주문은 멱등 키를 잡기 전에 거른다(DESIGN 10장 38).
-      const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
-      if (!user) return reply.code(401).send({ error: "없는 사용자입니다" });
+      // 남의 주문은 멱등 키를 잡기 전에 거른다(DESIGN 10장 38).
       const [order] = await db
         .select({ id: orders.id })
         .from(orders)

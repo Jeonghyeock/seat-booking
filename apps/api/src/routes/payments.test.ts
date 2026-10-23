@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { HoldResponse, OrderView, PaymentAccepted, PaymentConflict, PaymentProviderUnavailable } from "@seat-booking/shared";
 import { afterAll, describe, expect, inject, it } from "vitest";
-import { newPerformance, newUsers } from "../../test/fixtures.js";
+import { authHeaders, expectUnauthenticated, newPerformance, newSignedInUserIds, unauthenticatedHeaders } from "../../test/fixtures.js";
 import { buildApp } from "../app.js";
 import { createPool } from "../db/pool.js";
 import { FakePaymentProvider, SIGNATURE_HEADER, signWebhook } from "../fake-pay.js";
@@ -24,13 +24,13 @@ describe("결제 요청, 웹훅, 결제 확정", () => {
   async function newOrder(seatCount = 2) {
     provider.takeQueued();
     const { performanceId, seatIds } = await newPerformance(admin);
-    const [userId] = await newUsers(admin, 1);
+    const [userId] = await newSignedInUserIds(admin, 1);
     const hold = HoldResponse.parse(
       (
         await app.inject({
           method: "POST",
           url: `/performances/${performanceId}/holds`,
-          headers: { "x-user-id": String(userId) },
+          headers: authHeaders(userId),
           payload: { seatIds: seatIds.slice(0, seatCount) },
         })
       ).json(),
@@ -40,7 +40,7 @@ describe("결제 요청, 웹훅, 결제 확정", () => {
         await app.inject({
           method: "POST",
           url: `/holds/${hold.holdId}/orders`,
-          headers: { "x-user-id": String(userId), "idempotency-key": randomUUID() },
+          headers: { ...authHeaders(userId), "idempotency-key": randomUUID() },
         })
       ).json(),
     );
@@ -51,7 +51,7 @@ describe("결제 요청, 웹훅, 결제 확정", () => {
     app.inject({
       method: "POST",
       url: `/orders/${orderId}/payments`,
-      headers: { "x-user-id": String(userId), "idempotency-key": key },
+      headers: { ...authHeaders(userId), "idempotency-key": key },
       ...(body === undefined ? {} : { payload: body }),
     });
   const accepted = (res: Awaited<ReturnType<typeof pay>>) => {
@@ -141,7 +141,7 @@ describe("결제 요청, 웹훅, 결제 확정", () => {
     expect(hooks).toEqual([{ result: "processed" }]);
 
     const view = OrderView.parse(
-      (await app.inject({ method: "GET", url: `/orders/${order.orderId}`, headers: { "x-user-id": String(userId) } })).json(),
+      (await app.inject({ method: "GET", url: `/orders/${order.orderId}`, headers: authHeaders(userId) })).json(),
     );
     expect(view).toMatchObject({ status: "paid", payments: [{ paymentId: res.paymentId, status: "succeeded" }] });
     expect(view.tickets.map((t) => t.seatId)).toEqual(hold.seatIds);
@@ -515,22 +515,30 @@ describe("결제 요청, 웹훅, 결제 확정", () => {
     expect(await provider.flush()).toEqual([200]);
     expect(await state(order.orderId)).toMatchObject({ status: "paid", seats: ["sold", "sold"], tickets: 2 });
 
-    const [other] = await newUsers(admin, 1);
+    const [other] = await newSignedInUserIds(admin, 1);
     const res = await app.inject({
       method: "POST",
       url: `/performances/${performanceId}/holds`,
-      headers: { "x-user-id": String(other) },
+      headers: authHeaders(other),
       payload: { seatIds: [seatIds[5]] },
     });
     expect(res.statusCode).toBe(409);
     expect(res.json()).toMatchObject({ code: "SALES_CLOSED", reason: "CLOSED" });
   });
 
-  it("없는 사용자 401, 남의 주문 404이고, 키 행이 남지 않는다", async () => {
+  it("로그인하지 않았으면 401, 남의 주문 404이고, 키 행이 남지 않는다", async () => {
     const { order } = await newOrder(1);
-    const [stranger] = await newUsers(admin, 1);
+    const [stranger] = await newSignedInUserIds(admin, 1);
     const key = randomUUID();
-    expect((await pay(order.orderId, 999999999, {}, key)).statusCode).toBe(401);
+    for (const [name, headers] of Object.entries(await unauthenticatedHeaders(admin))) {
+      const res = await app.inject({
+        method: "POST",
+        url: `/orders/${order.orderId}/payments`,
+        headers: { ...headers, "idempotency-key": key },
+        payload: {},
+      });
+      expectUnauthenticated(res, name);
+    }
     expect((await pay(order.orderId, stranger!, {}, key)).statusCode).toBe(404);
     const { rows } = await admin.query("select count(*) as n from idempotency_keys where key = $1", [key]);
     expect(rows[0].n).toBe(0);

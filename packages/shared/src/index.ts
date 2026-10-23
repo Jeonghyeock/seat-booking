@@ -35,15 +35,17 @@ export const PerformanceParams = z.object({ id: IdString });
 export const HoldParams = z.object({ id: IdString });
 export const OrderParams = z.object({ id: IdString });
 
-// 4단계 전까지 쓰는 임시 헤더다. 인증이 아니어서 누구나 다른 사람 행세를 할 수 있다(DESIGN 10장 15).
-// Fastify는 검증한 값을 원래 헤더 위에 덧씌우므로 다른 헤더가 지워지지는 않는다. looseObject는 다른 헤더도 타입에 남긴다.
-export const UserHeaders = z.looseObject({ "x-user-id": IdString });
-
 // 주문 생성·결제 요청은 Idempotency-Key가 있어야 한다(DESIGN 6.2 멱등성). 길이는 DB의 CHECK와 같다.
-export const IdempotentUserHeaders = z.looseObject({
-  "x-user-id": IdString,
-  "idempotency-key": z.string().min(1).max(255),
+// Fastify는 검증한 값을 원래 헤더 위에 덧씌우므로 다른 헤더(쿠키 등)가 지워지지는 않는다. looseObject는 다른 헤더도 타입에 남긴다.
+export const IdempotencyHeaders = z.looseObject({ "idempotency-key": z.string().min(1).max(255) });
+
+// 로그인·CSRF·권한 확인의 401·403(DESIGN 6.3). 훅이 보내므로 보호 경로는 모두 401·403에 이것을 선언한다.
+// 선언이 다르면 훅이 보낸 code가 직렬화에서 지워지거나 500이 된다.
+export const AuthError = z.object({
+  error: z.string(),
+  code: z.enum(["UNAUTHENTICATED", "CSRF_REJECTED", "FORBIDDEN"]),
 });
+export type AuthError = z.infer<typeof AuthError>;
 
 export const SeatStatus = z.enum(["available", "held", "sold"]);
 export type SeatStatus = z.infer<typeof SeatStatus>;

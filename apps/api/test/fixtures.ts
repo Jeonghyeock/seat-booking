@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { AuthError } from "@seat-booking/shared";
 import type pg from "pg";
+import { expect } from "vitest";
 import { newSessionToken, type Role, SESSION_TTL_SECONDS, sessionCookieName } from "../src/auth.js";
 import { createDb } from "../src/db/client.js";
 import { readSeedFile, SAMPLE_SEED, seed } from "../src/db/seed.js";
@@ -58,4 +60,45 @@ export async function newSignedInUsers(
     token: tokens[i]!.token,
     headers: { cookie: `${sessionCookieName(true)}=${tokens[i]!.token}`, "x-requested-with": "seat-booking" },
   }));
+}
+
+// HTTP 테스트가 사용자를 id로 다루게 한다. 로그인한 사용자를 만들고, 그 id의 쿠키·CSRF 헤더를 authHeaders로 꺼낸다.
+// 테스트 파일마다 모듈이 따로라 표도 파일마다 따로다.
+const signedInHeaders = new Map<number, SignedInUser["headers"]>();
+export async function newSignedInUserIds(pool: pg.Pool, count: number, options: { role?: Role } = {}) {
+  const signedIn = await newSignedInUsers(pool, count, options);
+  for (const user of signedIn) signedInHeaders.set(user.id, user.headers);
+  return signedIn.map((user) => user.id);
+}
+// 테스트가 id를 number | undefined로 들고 있어 그대로 받는다. 로그인한 사용자가 아니면 던진다.
+export function authHeaders(userId: number | string | undefined) {
+  const headers = signedInHeaders.get(Number(userId));
+  if (!headers) throw new Error(`로그인한 테스트 사용자가 아닙니다: ${userId}`);
+  return headers;
+}
+
+// 로그인하지 않은 요청의 헤더들(DESIGN 6.3). 사용자 경로는 모두 401이어야 한다.
+// 3단계까지 쓰던 X-User-Id 헤더는 이제 아무 뜻이 없다. 모양이 틀린 쿠키와 만료된 세션은 응답에서 쿠키를 지운다.
+export async function unauthenticatedHeaders(pool: pg.Pool): Promise<Record<string, Record<string, string>>> {
+  const [someone] = await newUsers(pool, 1);
+  const [expired] = await newSignedInUsers(pool, 1);
+  await pool.query("update sessions set expires_at = now() - interval '1 second' where user_id = $1", [expired!.id]);
+  const csrf = { "x-requested-with": "seat-booking" };
+  return {
+    "쿠키 없음": csrf,
+    "X-User-Id 헤더만": { ...csrf, "x-user-id": String(someone) },
+    "모양이 틀린 쿠키": { ...csrf, cookie: `${sessionCookieName(true)}=not-a-token` },
+    "만료된 세션": expired!.headers,
+  };
+}
+
+export function expectUnauthenticated(
+  res: { statusCode: number; json(): unknown; headers: Record<string, unknown> },
+  name: string,
+) {
+  expect(res.statusCode, name).toBe(401);
+  expect(AuthError.parse(res.json()).code, name).toBe("UNAUTHENTICATED");
+  if (name === "모양이 틀린 쿠키" || name === "만료된 세션") {
+    expect(String(res.headers["set-cookie"]), name).toMatch(new RegExp(`^${sessionCookieName(true)}=;`));
+  }
 }

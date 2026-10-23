@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { HoldResponse, OrderView, PaymentAccepted, PaymentProviderUnavailable } from "@seat-booking/shared";
 import { afterAll, describe, expect, inject, it, vi } from "vitest";
-import { newPerformance, newSignedInUsers, newUsers } from "../test/fixtures.js";
+import { authHeaders, newPerformance, newSignedInUserIds, newSignedInUsers } from "../test/fixtures.js";
 import { buildApp } from "./app.js";
 import {
   cancelExpiredOrders,
@@ -34,11 +34,11 @@ describe("정리 작업", () => {
 
   async function newHold(seatCount = 2) {
     const { performanceId, seatIds } = await newPerformance(admin);
-    const [userId] = await newUsers(admin, 1);
+    const [userId] = await newSignedInUserIds(admin, 1);
     const res = await app.inject({
       method: "POST",
       url: `/performances/${performanceId}/holds`,
-      headers: { "x-user-id": String(userId) },
+      headers: authHeaders(userId),
       payload: { seatIds: seatIds.slice(0, seatCount) },
     });
     return { performanceId, seatIds, userId: userId!, hold: HoldResponse.parse(res.json()) };
@@ -49,7 +49,7 @@ describe("정리 작업", () => {
     const res = await app.inject({
       method: "POST",
       url: `/holds/${held.hold.holdId}/orders`,
-      headers: { "x-user-id": String(held.userId), "idempotency-key": randomUUID() },
+      headers: { ...authHeaders(held.userId), "idempotency-key": randomUUID() },
     });
     return { ...held, order: OrderView.parse(res.json()) };
   }
@@ -57,7 +57,7 @@ describe("정리 작업", () => {
     app.inject({
       method: "POST",
       url: `/orders/${orderId}/payments`,
-      headers: { "x-user-id": String(userId), "idempotency-key": key },
+      headers: { ...authHeaders(userId), "idempotency-key": key },
       payload: body,
     });
   const accepted = async (res: ReturnType<typeof pay>) => {
@@ -423,7 +423,7 @@ describe("정리 작업", () => {
   });
 
   it("5. 24시간 지난 멱등 키를 지우고, 그보다 새 키는 남긴다", async () => {
-    const [userId] = await newUsers(admin, 1);
+    const [userId] = await newSignedInUserIds(admin, 1);
     const insertKey = (key: string, age: string) =>
       admin.query(
         `insert into idempotency_keys (user_id, route, key, request_hash, owner_token, created_at, updated_at)

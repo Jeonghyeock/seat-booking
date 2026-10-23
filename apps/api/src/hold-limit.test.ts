@@ -1,7 +1,7 @@
 import { HoldConflict, HoldResponse } from "@seat-booking/shared";
 import { sql } from "drizzle-orm";
 import { afterAll, describe, expect, inject, it } from "vitest";
-import { newPerformance, newUsers } from "../test/fixtures.js";
+import { authHeaders, newPerformance, newSignedInUserIds, newUsers } from "../test/fixtures.js";
 import { buildApp } from "./app.js";
 import { createDb, type Db } from "./db/client.js";
 import { createPool } from "./db/pool.js";
@@ -19,7 +19,7 @@ describe("1인 좌석 한도(C6)", () => {
     app.inject({
       method: "POST",
       url: `/performances/${performanceId}/holds`,
-      headers: { "x-user-id": String(userId) },
+      headers: authHeaders(userId),
       payload: { seatIds },
     });
   const codeOf = (res: Awaited<ReturnType<typeof hold>>) =>
@@ -27,7 +27,7 @@ describe("1인 좌석 한도(C6)", () => {
 
   it("이미 쥔 좌석과 합쳐 4석을 넘으면 409 HOLD_LIMIT이고, 4석까지는 선점된다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const [userId] = await newUsers(pool, 1);
+    const [userId] = await newSignedInUserIds(pool, 1);
     expect(codeOf(await hold(performanceId, userId!, seatIds.slice(0, 3)))).toBe(201);
     expect(HoldConflict.parse((await hold(performanceId, userId!, seatIds.slice(3, 5))).json())).toMatchObject({
       code: "HOLD_LIMIT",
@@ -42,7 +42,7 @@ describe("1인 좌석 한도(C6)", () => {
   it("만료된 선점과 다른 회차의 선점은 한도에 세지 않는다", async () => {
     const first = await newPerformance(pool);
     const second = await newPerformance(pool);
-    const [userId] = await newUsers(pool, 1);
+    const [userId] = await newSignedInUserIds(pool, 1);
     const held = HoldResponse.parse((await hold(first.performanceId, userId!, first.seatIds.slice(0, 4))).json());
 
     expect(codeOf(await hold(second.performanceId, userId!, second.seatIds.slice(0, 4)))).toBe(201);
@@ -56,7 +56,7 @@ describe("1인 좌석 한도(C6)", () => {
 
   it("팔린 좌석도 한도에 센다. 선점의 만료 시각이 지난 팔린 좌석도 센다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const [userId] = await newUsers(pool, 1);
+    const [userId] = await newSignedInUserIds(pool, 1);
     const bought = HoldResponse.parse((await hold(performanceId, userId!, seatIds.slice(0, 3))).json());
     // 결제 확정(다음 PR) 대신 좌석을 sold로 바꾼다. 확정은 선점(hold_id)과 만료 시각을 그대로 남긴다(DESIGN 10장 16)
     await pool.query("update holds set expires_at = now() - interval '1 second' where id = $1", [bought.holdId]);
@@ -72,13 +72,13 @@ describe("1인 좌석 한도(C6)", () => {
     expect(HoldConflict.parse(full.json())).toMatchObject({ code: "HOLD_LIMIT", heldSeats: 1, purchasedSeats: 3 });
 
     // 다른 사용자의 팔린 좌석은 세지 않는다
-    const [other] = await newUsers(pool, 1);
+    const [other] = await newSignedInUserIds(pool, 1);
     expect(codeOf(await hold(performanceId, other!, seatIds.slice(4, 8)))).toBe(201);
   });
 
   it("C6: 한 사용자가 8개 창에서 동시에 한 석씩 선점하면 정확히 4석만 잡힌다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const [userId] = await newUsers(pool, 1);
+    const [userId] = await newSignedInUserIds(pool, 1);
     const codes = await Promise.all(seatIds.slice(0, 8).map(async (s) => codeOf(await hold(performanceId, userId!, [s]))));
     expect(codes.filter((c) => c === 201)).toHaveLength(4);
     expect(codes.filter((c) => c === "HOLD_LIMIT")).toHaveLength(4);
@@ -93,7 +93,7 @@ describe("1인 좌석 한도(C6)", () => {
 
   it("C6: 2석씩 4개 창에서 동시에 선점하면 2개 창만 성공한다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const [userId] = await newUsers(pool, 1);
+    const [userId] = await newSignedInUserIds(pool, 1);
     const pairs = [0, 2, 4, 6].map((i) => seatIds.slice(i, i + 2));
     const codes = await Promise.all(pairs.map(async (p) => codeOf(await hold(performanceId, userId!, p))));
     expect(codes.filter((c) => c === 201)).toHaveLength(2);

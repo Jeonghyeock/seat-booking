@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { HoldResponse, MyPerformance, OrderNotCancellable, OrderView, PaymentAccepted } from "@seat-booking/shared";
 import { afterAll, describe, expect, inject, it } from "vitest";
-import { newPerformance, newUsers } from "../../test/fixtures.js";
+import { authHeaders, expectUnauthenticated, newPerformance, newSignedInUserIds, unauthenticatedHeaders } from "../../test/fixtures.js";
 import { buildApp } from "../app.js";
 import { createPool } from "../db/pool.js";
 import { FakePaymentProvider } from "../fake-pay.js";
@@ -18,7 +18,7 @@ describe("POST /orders/:id/cancel", () => {
     await Promise.all([pool.end(), admin.end()]);
   });
 
-  const asUser = (userId: number) => ({ "x-user-id": String(userId) });
+  const asUser = (userId: number) => (authHeaders(userId));
   const hold = async (performanceId: number, userId: number, seatIds: number[]) => {
     const res = await app.inject({
       method: "POST",
@@ -31,7 +31,7 @@ describe("POST /orders/:id/cancel", () => {
   async function newOrder(seatCount = 2) {
     provider.takeQueued();
     const { performanceId, seatIds } = await newPerformance(admin);
-    const [userId] = await newUsers(admin, 1);
+    const [userId] = await newSignedInUserIds(admin, 1);
     const held = HoldResponse.parse((await hold(performanceId, userId!, seatIds.slice(0, seatCount))).json());
     const order = OrderView.parse(
       (
@@ -231,7 +231,7 @@ describe("POST /orders/:id/cancel", () => {
     await admin.query("update performance_seats set hold_expires_at = now() - interval '1 second' where hold_id = $1", [
       held.holdId,
     ]);
-    const [other] = await newUsers(admin, 1);
+    const [other] = await newSignedInUserIds(admin, 1);
     const taken = HoldResponse.parse((await hold(performanceId, other!, [held.seatIds[0]!])).json());
 
     expect(OrderView.parse((await cancel(order.orderId, userId)).json())).toMatchObject({
@@ -248,10 +248,12 @@ describe("POST /orders/:id/cancel", () => {
     ]);
   });
 
-  it("없는 사용자 401, 남의 주문과 없는 주문 404", async () => {
+  it("로그인하지 않았으면 401, 남의 주문과 없는 주문 404", async () => {
     const { order } = await newOrder(1);
-    const [stranger] = await newUsers(admin, 1);
-    expect((await cancel(order.orderId, 999999999)).statusCode).toBe(401);
+    const [stranger] = await newSignedInUserIds(admin, 1);
+    for (const [name, headers] of Object.entries(await unauthenticatedHeaders(admin))) {
+      expectUnauthenticated(await app.inject({ method: "POST", url: `/orders/${order.orderId}/cancel`, headers }), name);
+    }
     expect((await cancel(order.orderId, stranger!)).statusCode).toBe(404);
     expect((await cancel(999999999, stranger!)).statusCode).toBe(404);
     expect((await state(order.orderId)).status).toBe("pending");
