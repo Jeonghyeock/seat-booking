@@ -67,6 +67,8 @@ export const EmailTaken = z.object({ error: z.string(), code: z.literal("EMAIL_T
 export const InvalidCredentials = z.object({ error: z.string(), code: z.literal("INVALID_CREDENTIALS") });
 // 비밀번호 해시가 밀려 있다(503, Retry-After). 잠시 뒤 다시 보낸다.
 export const TryAgainLater = z.object({ error: z.string(), code: z.literal("TRY_AGAIN_LATER") });
+// 가입·로그인 시도가 너무 많다(429, Retry-After 초 뒤에 다시).
+export const TooManyRequests = z.object({ error: z.string(), code: z.literal("TOO_MANY_REQUESTS") });
 
 export const SeatStatus = z.enum(["available", "held", "sold"]);
 export type SeatStatus = z.infer<typeof SeatStatus>;

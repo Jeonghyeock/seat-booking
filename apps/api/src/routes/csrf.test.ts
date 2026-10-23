@@ -3,7 +3,7 @@ import { AuthError } from "@seat-booking/shared";
 import { afterAll, describe, expect, inject, it } from "vitest";
 import { newPerformance, newSignedInUsers } from "../../test/fixtures.js";
 import { buildApp } from "../app.js";
-import { loadAuthConfig } from "../config.js";
+import { loadAuthConfig, loadTrustProxy } from "../config.js";
 import { createPool } from "../db/pool.js";
 
 describe("CSRF", () => {
@@ -22,9 +22,10 @@ describe("CSRF", () => {
       headers,
       payload: { email: `${randomUUID()}@test.local`, password: randomUUID() },
     });
-  const rejected = (res: { statusCode: number; json(): unknown }, name: string) => {
+  const rejected = (res: { statusCode: number; headers: Record<string, unknown>; json(): unknown }, name: string) => {
     expect(res.statusCode, name).toBe(403);
     expect(AuthError.parse(res.json()).code, name).toBe("CSRF_REJECTED");
+    expect(res.headers["cache-control"], name).toBe("no-store");
   };
   const marker = { "x-requested-with": "seat-booking" };
 
@@ -54,6 +55,25 @@ describe("CSRF", () => {
     rejected(await app.inject({ method: "POST", url: "/auth/logout" }), "로그아웃도");
   });
 
+  it("상태를 바꾸는 경로는 웹훅 말고 모두 CSRF를 확인한다(범위 밖에 잘못 둔 경로를 잡는다)", async () => {
+    await app.ready();
+    const writes = app.allRoutes.filter((route) => ["POST", "PUT", "PATCH", "DELETE"].includes(route.method));
+    expect(writes.map((route) => `${route.method} ${route.url}`).sort()).toEqual([
+      "POST /auth/login",
+      "POST /auth/logout",
+      "POST /auth/signup",
+      "POST /holds/:id/orders",
+      "POST /orders/:id/cancel",
+      "POST /orders/:id/payments",
+      "POST /performances/:id/holds",
+      "POST /webhooks/fake-pay",
+    ]);
+    for (const route of writes) {
+      if (route.url === "/webhooks/fake-pay") continue;
+      rejected(await app.inject({ method: route.method as "POST", url: route.url.replace(/:id/g, "1") }), route.url);
+    }
+  });
+
   it("GET은 확인하지 않는다", async () => {
     expect((await app.inject({ method: "GET", url: "/performances" })).statusCode).toBe(200);
     expect((await app.inject({ method: "GET", url: "/auth/me" })).statusCode).toBe(401);
@@ -71,5 +91,21 @@ describe("설정 읽기", () => {
     expect(() => loadAuthConfig({ APP_ORIGIN: "http://localhost:5173/" })).toThrow();
     expect(() => loadAuthConfig({ APP_ORIGIN: "localhost:5173" })).toThrow();
     expect(() => loadAuthConfig({ COOKIE_SECURE: "0" })).toThrow();
+  });
+
+  it("AUTH_RATE_LIMIT_PER_MINUTE는 숫자만 받는다", () => {
+    expect(loadAuthConfig({ AUTH_RATE_LIMIT_PER_MINUTE: "20" }).authRateLimitPerMinute).toBe(20);
+    for (const value of ["0", "0x10", "1e9", "10.5", "-1", ""]) {
+      expect(() => loadAuthConfig({ AUTH_RATE_LIMIT_PER_MINUTE: value }), value).toThrow();
+    }
+  });
+
+  it("TRUST_PROXY는 비우면 끄고, 프록시 주소·CIDR만 받는다. true와 숫자는 거절한다", () => {
+    expect(loadTrustProxy({})).toBe(false);
+    expect(loadTrustProxy({ TRUST_PROXY: " " })).toBe(false);
+    expect(loadTrustProxy({ TRUST_PROXY: "127.0.0.1, 10.0.0.0/8,::1" })).toEqual(["127.0.0.1", "10.0.0.0/8", "::1"]);
+    for (const value of ["true", "1", "10.0.0.0/33", "fd00::/129", "localhost", "10.0.0.1/8/1"]) {
+      expect(() => loadTrustProxy({ TRUST_PROXY: value }), value).toThrow();
+    }
   });
 });
