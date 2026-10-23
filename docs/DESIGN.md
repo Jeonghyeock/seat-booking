@@ -71,7 +71,7 @@
 | 테이블 | 핵심 열 | 비고 |
 |---|---|---|
 | `users` | email(unique), password_hash, role | role: customer / admin(기본 customer). 2단계에서 id·email만으로 먼저 만들고(선점이 가리킬 사용자), password_hash·role은 4단계에서 더한다. 이메일은 앞뒤 공백을 지우고 소문자로 저장한다(CHECK). password_hash는 비어 있을 수 있다(4단계 전에 만든 사용자는 로그인할 수 없다) |
-| `sessions` | token_hash(PK), user_id, created_at, expires_at | 로그인 세션. 쿠키의 토큰이 아니라 그 SHA-256(bytea 32바이트)만 둔다. 만료는 손님 7일·관리자 12시간(늘리지 않는다). 인덱스 `(user_id)`(사용자당 10개 제한, 역할 변경 때 모두 지우기), 정리용 `(expires_at)` |
+| `sessions` | token_hash(PK), user_id, created_at, expires_at | 로그인 세션. 쿠키의 토큰이 아니라 그 SHA-256(16진수 64자)만 둔다. 만료는 손님 7일·관리자 12시간(늘리지 않는다). 인덱스 `(user_id, created_at)`(사용자당 10개 제한, 역할 변경 때 모두 지우기), 정리용 `(expires_at)` |
 | `venues`, `seats` | 구역·열·번호, 등급 | 시드 JSON |
 | `shows` | title | 공연 작품. 1단계에서 더함(회차에 제목을 두면 회차마다 되풀이된다) |
 | `performances` | show_id, venue_id, starts_at, sales_open_at, sales_close_at | 회차. 판매 기간은 `sales_open_at <= now() < sales_close_at`이고 `sales_close_at <= starts_at`(CHECK). 판매 종료는 회차마다 정한다(10장 54) |
@@ -337,7 +337,7 @@ bus-review에서는 Supabase가 대신 해 줬던 부분을 직접 만든다. 3�
 - 무차별 대입과 argon2 부하: 로그인·가입에만 속도 제한을 건다(`@fastify/rate-limit`, 메모리 저장소, IP당 분당 10회, 로그인은 IP+이메일). argon2는 libuv 스레드 풀(기본 4개)에서 돌아 몰리면 DB 연결의 DNS 조회·파일 작업까지 밀리므로, 동시에 도는 해시를 2개로 제한하고 넘으면 503 `Retry-After`다. 계정 잠금은 하지 않는다(남의 계정을 잠그는 공격이 된다). 프록시 뒤에서는 `trustProxy`를 켜야 IP가 맞다.
 
 **세션.**
-- 로그인·가입할 때마다 무작위 32바이트 토큰을 새로 만들어 쿠키로 준다(base64url 43자). DB에는 토큰의 SHA-256(32바이트)만 둔다. DB가 새도 그 값으로 쿠키를 만들 수 없다. 로그인 전 세션이 없으므로 세션 고정 공격(미리 알려 준 세션 id로 로그인시키기)이 통하지 않는다. 요청에 이미 세션 쿠키가 있으면 그 행을 지운다.
+- 로그인·가입할 때마다 무작위 32바이트 토큰을 새로 만들어 쿠키로 준다(base64url 43자). DB에는 토큰의 SHA-256(16진수 64자)만 둔다. DB가 새도 그 값으로 쿠키를 만들 수 없다. 로그인 전 세션이 없으므로 세션 고정 공격(미리 알려 준 세션 id로 로그인시키기)이 통하지 않는다. 요청에 이미 세션 쿠키가 있으면 그 행을 지운다.
 - 쿠키: `HttpOnly`, `SameSite=Lax`, `Path=/`, `Max-Age`는 세션 만료와 같다. `Secure`는 설정(`COOKIE_SECURE`)으로 켠다. 켜면 이름이 `__Host-sid`(Secure, Path=/, Domain 없음이 강제되어 서브도메인·http 구간이 쿠키를 심을 수 없다), 끄면 `sid`다. 운영은 켜고 http 개발 서버는 끈다.
 - 만료는 손님 7일, 관리자 12시간이다(만들 때 역할로 정한다). 요청마다 늘리지 않는다(요청마다 쓰기가 생기지 않게). 만료된 세션은 401이고 정리 작업 6이 지운다. 여러 기기에서 로그인할 수 있게 다른 세션을 지우지 않되, 사용자당 최근 10개까지만 남긴다. 전체 로그아웃·비밀번호 변경은 이번 범위가 아니다(생기면 그 사용자의 다른 세션을 모두 지운다).
 - 역할을 바꾸면(`admin:promote`) 그 사용자의 세션을 모두 지운다. 역할은 요청마다 `users`에서 읽으므로 내리는 것도 바로 적용된다.

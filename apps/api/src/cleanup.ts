@@ -26,6 +26,7 @@ export type CleanupCounts = {
   refundFailed: number;
   reconciled: number;
   deletedKeys: number;
+  deletedSessions: number;
 };
 
 // 1. 만료된 선점 좌석을 빈 좌석으로 되돌린다. status·hold_id·hold_expires_at을 한 UPDATE에서 함께 비워 CHECK 두 개와 맞춘다.
@@ -207,8 +208,21 @@ export async function deleteOldIdempotencyKeys(db: Db) {
   });
 }
 
-// 다섯 단계를 한 번 돈다. 한 단계가 실패해도 다음 단계는 돈다.
-// DB만 쓰는 단계(1, 2, 5)를 먼저 돌아, 결제사가 느려도 이번 바퀴에 끝낸다.
+// 6. 만료된 세션을 지운다(DESIGN 6.3). 조회가 이미 만료를 거르므로 늦게 지워도 된다.
+export async function deleteExpiredSessions(db: Db) {
+  return writeTransaction(db, async (tx) => {
+    const { rows } = await tx.execute(sql`
+      -- in (select …)로 쓰면 표 전체를 해시 조인한다. 배열로 받으면 기본 키로 지운다(리뷰 L5).
+      delete from sessions
+       where token_hash = any(array(select token_hash from sessions where expires_at < now() limit ${BATCH}))
+      returning token_hash
+    `);
+    return rows.length;
+  });
+}
+
+// 여섯 단계를 한 번 돈다. 한 단계가 실패해도 다음 단계는 돈다.
+// DB만 쓰는 단계(1, 2, 5, 6)를 먼저 돌아, 결제사가 느려도 이번 바퀴에 끝낸다.
 export async function runCleanup(db: Db, provider: FakePaymentProvider, log: Logger): Promise<CleanupCounts> {
   const counts: CleanupCounts = {
     releasedSeats: 0,
@@ -217,6 +231,7 @@ export async function runCleanup(db: Db, provider: FakePaymentProvider, log: Log
     refundFailed: 0,
     reconciled: 0,
     deletedKeys: 0,
+    deletedSessions: 0,
   };
   const step = async (name: string, run: () => Promise<void>) => {
     try {
@@ -233,6 +248,9 @@ export async function runCleanup(db: Db, provider: FakePaymentProvider, log: Log
   });
   await step("멱등 키 지우기", async () => {
     counts.deletedKeys = await deleteOldIdempotencyKeys(db);
+  });
+  await step("세션 지우기", async () => {
+    counts.deletedSessions = await deleteExpiredSessions(db);
   });
   await step("환불", async () => {
     const { refunded, failed } = await refundPayments(db, provider, log);

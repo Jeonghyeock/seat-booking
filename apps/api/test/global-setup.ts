@@ -48,9 +48,22 @@ export default async function setup(project: TestProject) {
 
   return async () => {
     await admin(baseUrl, async (client) => {
-      for (const db of [testDb, isolatedDb]) await client.query(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
+      for (const db of [testDb, isolatedDb]) await dropWithRetry(client, db);
     });
   };
+}
+
+// FORCE는 남은 연결을 끊지만, autovacuum 작업자는 앱 role이 끊을 권한이 없어(42501) 실패할 수 있다. 끝나길 잠시 기다려 다시 한다.
+async function dropWithRetry(client: pg.Client, db: string) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await client.query(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
+      return;
+    } catch (err) {
+      if ((err as { code?: string }).code !== "42501" || attempt === 10) throw err;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
 }
 
 async function admin(baseUrl: string, work: (client: pg.Client) => Promise<unknown>) {

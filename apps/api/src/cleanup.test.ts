@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { HoldResponse, OrderView, PaymentAccepted, PaymentProviderUnavailable } from "@seat-booking/shared";
 import { afterAll, describe, expect, inject, it, vi } from "vitest";
-import { newPerformance, newUsers } from "../test/fixtures.js";
+import { newPerformance, newSignedInUsers, newUsers } from "../test/fixtures.js";
 import { buildApp } from "./app.js";
 import {
   cancelExpiredOrders,
+  deleteExpiredSessions,
   deleteOldIdempotencyKeys,
   reconcilePayments,
   refundPayments,
@@ -407,6 +408,18 @@ describe("정리 작업", () => {
     expect((await orderState(order.orderId)).payments).toEqual(["requested"]);
     await reconcilePayments(db, provider, log);
     expect(await orderState(order.orderId)).toMatchObject({ status: "paid", payments: ["succeeded"] });
+  });
+
+  it("6. 만료된 세션을 지우고, 만료 전 세션은 남긴다", async () => {
+    const [expired, fresh] = await newSignedInUsers(admin, 2);
+    await admin.query("update sessions set expires_at = now() - interval '1 second' where user_id = $1", [expired!.id]);
+    // 주기 실행에도 이 단계가 들어 있다
+    expect((await runCleanup(db, provider, log)).deletedSessions).toBeGreaterThanOrEqual(1);
+    await deleteExpiredSessions(db);
+    const { rows } = await admin.query("select user_id from sessions where user_id = any($1::bigint[])", [
+      [expired!.id, fresh!.id],
+    ]);
+    expect(rows.map((r) => r.user_id)).toEqual([fresh!.id]);
   });
 
   it("5. 24시간 지난 멱등 키를 지우고, 그보다 새 키는 남긴다", async () => {

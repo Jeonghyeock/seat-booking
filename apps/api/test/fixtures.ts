@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
+import { newSessionToken, type Role, SESSION_TTL_SECONDS, sessionCookieName } from "../src/auth.js";
 import { createDb } from "../src/db/client.js";
 import { readSeedFile, SAMPLE_SEED, seed } from "../src/db/seed.js";
 
@@ -33,4 +34,28 @@ export async function newUsers(pool: pg.Pool, count: number) {
     [randomUUID(), count],
   );
   return rows.map((r) => r.id);
+}
+
+// 로그인한 사용자. 가입·로그인 경로(argon2)를 거치지 않고 세션 행을 직접 넣는다. 1,000명도 문장 두세 개다.
+// 토큰과 해시는 앱의 세션 모듈이 만든다(해시 방식이 한 곳에만 있게). 헤더는 기본 설정(Secure 켬)의 쿠키 이름과
+// CSRF 확인에 필요한 사용자 지정 헤더다(DESIGN 6.3 "테스트 인증").
+export type SignedInUser = { id: number; token: string; headers: { cookie: string; "x-requested-with": "seat-booking" } };
+export async function newSignedInUsers(
+  pool: pg.Pool,
+  count: number,
+  { role = "customer" }: { role?: Role } = {},
+): Promise<SignedInUser[]> {
+  const ids = await newUsers(pool, count);
+  if (role !== "customer") await pool.query("update users set role = $2 where id = any($1::bigint[])", [ids, role]);
+  const tokens = ids.map(() => newSessionToken());
+  await pool.query(
+    `insert into sessions (token_hash, user_id, expires_at)
+     select h, u, now() + make_interval(secs => $3) from unnest($1::text[], $2::bigint[]) as t(h, u)`,
+    [tokens.map((t) => t.tokenHash), ids, SESSION_TTL_SECONDS[role]],
+  );
+  return ids.map((id, i) => ({
+    id,
+    token: tokens[i]!.token,
+    headers: { cookie: `${sessionCookieName(true)}=${tokens[i]!.token}`, "x-requested-with": "seat-booking" },
+  }));
 }
