@@ -11,9 +11,12 @@ import { applyPaymentResult, failVoidedPayment, PROVIDER_TIMEOUT_MS, withTimeout
 export const BATCH = 500;
 // 웹훅을 잃은 결제를 결제사에 다시 묻기까지(10장 31). 값은 6단계 측정 뒤 다시 정한다.
 export const RECONCILE_AFTER_SECONDS = 30;
-// 결제사가 모른다고 답한 환불을 몇 번 다시 해 볼지(10장 35).
+// 결제사가 모른다고 답한 환불을 모두 몇 번 해 볼지. 이 번째에도 모르면 refund_failed다(10장 35).
 export const MAX_REFUND_ATTEMPTS = 5;
 export const KEEP_IDEMPOTENCY_KEYS_HOURS = 24;
+// 결제사에 이만큼 잇달아 닿지 않으면 그 단계를 이번 바퀴에서 멈춘다. 결제마다 시간 제한만큼 기다리고 로그를 남기지 않게.
+// 첫 실패에 멈추면, 늘 실패하는 결제 하나가 맨 앞에 있을 때 뒤의 결제가 끝내 처리되지 않는다.
+export const MAX_PROVIDER_FAILURES_PER_STEP = 3;
 
 type Logger = Pick<FastifyBaseLogger, "warn" | "error">;
 export type CleanupCounts = {
@@ -67,48 +70,75 @@ export async function cancelExpiredOrders(db: Db) {
   });
 }
 
+// 결제사에 잇달아 닿지 않은 횟수를 센다. 정해 둔 횟수가 되면 경보 한 줄을 남기고 그 단계를 멈추게 한다.
+function providerFailures(step: string, log: Logger) {
+  let inARow = 0;
+  return {
+    succeeded() {
+      inARow = 0;
+    },
+    // 멈춰야 하면 true.
+    failed(err: unknown, paymentId: number, remaining: number) {
+      inARow++;
+      if (inARow < MAX_PROVIDER_FAILURES_PER_STEP) {
+        log.warn({ err, paymentId }, `${step}: 결제사에 닿지 않음`);
+        return false;
+      }
+      log.warn({ err, remaining }, `${step}: 결제사에 ${inARow}번 잇달아 닿지 않아 이번 바퀴를 멈춤`);
+      return true;
+    },
+  };
+}
+
 // 3. 환불. refund_pending 결제를 잠그지 않고 고르고, 트랜잭션 밖에서 결제사에 환불을 요청한다(결제 id가 환불의 멱등 키).
 // 성공하면 새 트랜잭션에서 refund_pending일 때만 refunded로 바꾼다. 결제사를 부른 뒤 바꾸기 전에 죽어도 다음 번에 다시 부르면 된다.
 // 결제사가 그 결제를 모르면 시도 횟수를 늘리고, 다섯 번째면 refund_failed로 바꾸고 경보 로그를 남긴다(관리자가 다시 시도한다).
+// 횟수는 고를 때 읽은 값일 때만 늘린다. 두 정리 작업이 겹치거나 관리자가 다시 시도하게 되돌린 뒤 묵은 답이 와도 한 번만 센다.
 // 결제사에 닿지 않으면 횟수를 늘리지 않고 다음 번에 다시 한다.
 export async function refundPayments(db: Db, provider: FakePaymentProvider, log: Logger) {
-  const { rows: pending } = await db.execute<{ id: number }>(sql`
-    select id from payments where status = 'refund_pending' order by created_at limit ${BATCH}
+  const { rows: pending } = await db.execute<{ id: number; refund_attempts: number }>(sql`
+    select id, refund_attempts from payments where status = 'refund_pending' order by created_at limit ${BATCH}
   `);
+  const failures = providerFailures("환불", log);
   let refunded = 0;
   let failed = 0;
-  for (const { id } of pending) {
+  for (const [i, { id, refund_attempts: attempts }] of pending.entries()) {
     let result: RefundResult;
     try {
       result = await withTimeout(provider.refund(id), PROVIDER_TIMEOUT_MS);
+      failures.succeeded();
     } catch (err) {
-      log.warn({ err, paymentId: id }, "환불: 결제사에 닿지 않음");
+      if (failures.failed(err, id, pending.length - i - 1)) break;
       continue;
     }
-    if (result.kind === "refunded") {
+    try {
+      if (result.kind === "refunded") {
+        const { rows } = await writeTransaction(db, (tx) =>
+          tx.execute(sql`
+            update payments set status = 'refunded', updated_at = now()
+             where id = ${id} and status = 'refund_pending'
+            returning id
+          `),
+        );
+        refunded += rows.length;
+        continue;
+      }
       const { rows } = await writeTransaction(db, (tx) =>
-        tx.execute(sql`
-          update payments set status = 'refunded', updated_at = now()
-           where id = ${id} and status = 'refund_pending'
-          returning id
+        tx.execute<{ status: string }>(sql`
+          update payments
+             set refund_attempts = refund_attempts + 1,
+                 status = case when refund_attempts + 1 >= ${MAX_REFUND_ATTEMPTS} then 'refund_failed' else status end,
+                 updated_at = now()
+           where id = ${id} and status = 'refund_pending' and refund_attempts = ${attempts}
+          returning status
         `),
       );
-      refunded += rows.length;
-      continue;
-    }
-    const { rows } = await writeTransaction(db, (tx) =>
-      tx.execute<{ status: string }>(sql`
-        update payments
-           set refund_attempts = refund_attempts + 1,
-               status = case when refund_attempts + 1 >= ${MAX_REFUND_ATTEMPTS} then 'refund_failed' else status end,
-               updated_at = now()
-         where id = ${id} and status = 'refund_pending'
-        returning status
-      `),
-    );
-    if (rows[0]?.status === "refund_failed") {
-      failed++;
-      log.error({ paymentId: id }, "환불: 결제사가 결제를 몰라 다섯 번 실패, refund_failed");
+      if (rows[0]?.status === "refund_failed") {
+        failed++;
+        log.error({ paymentId: id }, "환불: 결제사가 결제를 몰라 다섯 번째에도 실패, refund_failed");
+      }
+    } catch (err) {
+      log.warn({ err, paymentId: id }, "환불: 결과를 적지 못함, 다음 번에 다시");
     }
   }
   return { refunded, failed };
@@ -126,14 +156,22 @@ export async function reconcilePayments(db: Db, provider: FakePaymentProvider, l
      order by created_at
      limit ${BATCH}
   `);
+  const failures = providerFailures("대사", log);
   let reconciled = 0;
-  for (const { id } of stale) {
+  for (const [i, { id }] of stale.entries()) {
+    let found: LookupResult;
     try {
-      let found: LookupResult = await withTimeout(provider.lookup(id), PROVIDER_TIMEOUT_MS);
+      found = await withTimeout(provider.lookup(id), PROVIDER_TIMEOUT_MS);
       if (found.status === "unknown") {
         const voided = await withTimeout(provider.void(id), PROVIDER_TIMEOUT_MS);
         found = voided.kind === "voided" ? { status: "voided" } : { status: voided.status, providerRef: voided.providerRef };
       }
+      failures.succeeded();
+    } catch (err) {
+      if (failures.failed(err, id, stale.length - i - 1)) break;
+      continue;
+    }
+    try {
       if (found.status === "voided") {
         if (await writeTransaction(db, (tx) => failVoidedPayment(tx, id))) reconciled++;
         continue;
@@ -147,7 +185,7 @@ export async function reconcilePayments(db: Db, provider: FakePaymentProvider, l
       const result = await writeTransaction(db, (tx) => applyPaymentResult(tx, event, log));
       if (result === "processed") reconciled++;
     } catch (err) {
-      log.warn({ err, paymentId: id }, "대사: 이번에는 맞추지 못함");
+      log.warn({ err, paymentId: id }, "대사: 결과를 반영하지 못함, 다음 번에 다시");
     }
   }
   return reconciled;
@@ -169,7 +207,8 @@ export async function deleteOldIdempotencyKeys(db: Db) {
   });
 }
 
-// 다섯 단계를 차례로 한 번 돈다. 한 단계가 실패해도 다음 단계는 돈다.
+// 다섯 단계를 한 번 돈다. 한 단계가 실패해도 다음 단계는 돈다.
+// DB만 쓰는 단계(1, 2, 5)를 먼저 돌아, 결제사가 느려도 이번 바퀴에 끝낸다.
 export async function runCleanup(db: Db, provider: FakePaymentProvider, log: Logger): Promise<CleanupCounts> {
   const counts: CleanupCounts = {
     releasedSeats: 0,
@@ -192,6 +231,9 @@ export async function runCleanup(db: Db, provider: FakePaymentProvider, log: Log
   await step("주문 취소", async () => {
     counts.cancelledOrders = await cancelExpiredOrders(db);
   });
+  await step("멱등 키 지우기", async () => {
+    counts.deletedKeys = await deleteOldIdempotencyKeys(db);
+  });
   await step("환불", async () => {
     const { refunded, failed } = await refundPayments(db, provider, log);
     counts.refunded = refunded;
@@ -200,23 +242,22 @@ export async function runCleanup(db: Db, provider: FakePaymentProvider, log: Log
   await step("대사", async () => {
     counts.reconciled = await reconcilePayments(db, provider, log);
   });
-  await step("멱등 키 지우기", async () => {
-    counts.deletedKeys = await deleteOldIdempotencyKeys(db);
-  });
   return counts;
 }
 
 // 서버를 띄우는 main.ts에서만 켠다(buildApp은 켜지 않는다). 테스트는 함수를 직접 부른다.
-// 앞 번이 끝나지 않았으면 이번은 건너뛴다. 멈추는 함수를 돌려준다.
+// 앞 번이 끝나지 않았으면 이번은 건너뛴다. 멈추는 함수는 진행 중인 바퀴가 끝날 때까지 기다린다(풀을 닫기 전에 부른다).
 export function startCleanupLoop(db: Db, provider: FakePaymentProvider, log: Logger, intervalMs = 10_000) {
-  let running = false;
+  let current: Promise<unknown> | undefined;
   const timer = setInterval(() => {
-    if (running) return;
-    running = true;
-    void runCleanup(db, provider, log).finally(() => {
-      running = false;
+    if (current) return;
+    current = runCleanup(db, provider, log).finally(() => {
+      current = undefined;
     });
   }, intervalMs);
   timer.unref();
-  return () => clearInterval(timer);
+  return async () => {
+    clearInterval(timer);
+    await current;
+  };
 }

@@ -185,14 +185,15 @@ describe("정리 작업", () => {
   it("C3 확정이 먼저: 확정이 좌석과 주문을 쥔 사이 만료가 지나도 정리는 건너뛰고, 확정이 끝나면 팔린 좌석이라 대상이 아니다", async () => {
     const { userId, order, hold, performanceId } = await newOrder(2);
     await accepted(pay(order.orderId, userId));
-    const { rows: expiry } = await admin.query<{ at: Date }>(
-      "update holds set expires_at = now() + interval '1 second' where id = $1 returning expires_at as at",
-      [hold.holdId],
-    );
-    await admin.query("update performance_seats set hold_expires_at = $2 where hold_id = $1", [hold.holdId, expiry[0]!.at]);
 
     // 표를 넣지 못하게 막아, 확정이 좌석을 sold로 바꾸고 주문을 잡은 채 기다리게 한다
     await withHolder("lock table tickets in exclusive mode", [], async (release) => {
+      // 확정이 만료 전에 좌석을 보도록, 만료를 1초 뒤로 당긴 다음 곧바로 보낸다
+      const { rows: expiry } = await admin.query<{ at: Date }>(
+        "update holds set expires_at = now() + interval '1 second' where id = $1 returning expires_at as at",
+        [hold.holdId],
+      );
+      await admin.query("update performance_seats set hold_expires_at = $2 where hold_id = $1", [hold.holdId, expiry[0]!.at]);
       const delivered = provider.flush();
       await waitForLockWaiters(1);
       while ((await admin.query("select now() > $1 as passed", [expiry[0]!.at])).rows[0].passed !== true) {
@@ -211,6 +212,20 @@ describe("정리 작업", () => {
     await cancelExpiredOrders(db);
     expect(await orderState(order.orderId)).toMatchObject({ status: "paid", payments: ["succeeded"], tickets: 2 });
     expect(await seatStatuses(performanceId, hold.seatIds)).toEqual(["sold", "sold"]);
+  });
+
+  it("C3 만료가 먼저 지남: 확정이 만료를 보고 환불로 가면 좌석은 held로 남고, 다음 정리 작업이 풀고 환불한다", async () => {
+    const { userId, order, hold, performanceId } = await newOrder(2);
+    const payment = await accepted(pay(order.orderId, userId));
+    await expireHold(hold.holdId);
+    expect(await provider.flush()).toEqual([200]);
+    expect(await orderState(order.orderId)).toMatchObject({ status: "cancelled", cancel_reason: "expired", payments: ["refund_pending"] });
+    expect(await seatStatuses(performanceId, hold.seatIds)).toEqual(["held", "held"]);
+
+    await runCleanup(db, provider, log);
+    expect(await seatStatuses(performanceId, hold.seatIds)).toEqual(["available", "available"]);
+    expect((await orderState(order.orderId)).payments).toEqual(["refunded"]);
+    expect(provider.isRefunded(payment.paymentId)).toBe(true);
   });
 
   it("3. 환불: 결제사가 모르는 결제는 시도 횟수를 늘리고 다섯 번째에 refund_failed다. 결제사에 닿지 않으면 횟수를 늘리지 않는다", async () => {
@@ -236,7 +251,65 @@ describe("정리 작업", () => {
     log.error.mockClear();
     await refundPayments(db, provider, log);
     expect(await attempts()).toEqual({ status: "refund_failed", refund_attempts: 5 });
-    expect(log.error).toHaveBeenCalledTimes(1);
+    expect(log.error).toHaveBeenCalledWith(expect.objectContaining({ paymentId }), expect.any(String));
+  });
+
+  it("3. 환불: 두 정리 작업이 겹쳐 같은 결제에 '모른다'를 받아도 시도 횟수는 한 번만 는다", async () => {
+    const { order } = await newOrder(1);
+    const { rows } = await admin.query<{ id: number }>(
+      "insert into payments (order_id, status, amount, idempotency_key) values ($1, 'refund_pending', $2, $3) returning id",
+      [order.orderId, order.amount, randomUUID()],
+    );
+    // 두 작업이 모두 결제를 고른 뒤 결제사의 답을 기다리게 한다
+    let open!: () => void;
+    const gate = new Promise<void>((r) => {
+      open = r;
+    });
+    let waiting = 0;
+    const spy = vi.spyOn(provider, "refund").mockImplementation(async () => {
+      waiting++;
+      await gate;
+      return { kind: "unknown" };
+    });
+    try {
+      const runs = [refundPayments(db, provider, log), refundPayments(db, provider, log)];
+      while (waiting < 2) await new Promise((r) => setTimeout(r, 5));
+      open();
+      await Promise.all(runs);
+    } finally {
+      spy.mockRestore();
+    }
+    const { rows: after } = await admin.query("select refund_attempts from payments where id = $1", [rows[0]!.id]);
+    expect(after[0].refund_attempts).toBe(1);
+  });
+
+  it("결제사에 잇달아 세 번 닿지 않으면 그 단계를 이번 바퀴에서 멈추고 경보는 몇 줄만 남긴다", async () => {
+    const { order } = await newOrder(1);
+    for (let i = 0; i < 6; i++) {
+      await admin.query(
+        "insert into payments (order_id, status, amount, idempotency_key) values ($1, 'refund_pending', $2, $3)",
+        [order.orderId, order.amount, randomUUID()],
+      );
+    }
+    const refund = vi.spyOn(provider, "refund");
+    log.warn.mockClear();
+    provider.outage = "down";
+    let calls: number;
+    try {
+      await refundPayments(db, provider, log);
+      calls = refund.mock.calls.length;
+    } finally {
+      provider.outage = null;
+      refund.mockRestore();
+    }
+    expect(calls).toBe(3);
+    expect(log.warn).toHaveBeenCalledTimes(3);
+    // 다음 바퀴에는 다시 한다
+    await refundPayments(db, provider, log);
+    const { rows } = await admin.query("select count(*) as n from payments where order_id = $1 and refund_attempts = 1", [
+      order.orderId,
+    ]);
+    expect(rows[0].n).toBe(6);
   });
 
   it("4. 대사: 30초 넘게 requested인 결제를 결제사에 물어 성공이면 확정하고 실패면 failed다. 30초가 안 된 결제는 그대로다", async () => {
@@ -295,6 +368,32 @@ describe("정리 작업", () => {
     expect((await orderState(order.orderId)).payments).toEqual(["failed"]);
   });
 
+  it("4. 대사: 결제사가 모른다고 답했는데 무효로 하려는 사이 결제가 만들어졌으면, 무효로 하지 않고 그 결과로 확정한다", async () => {
+    const { userId, order } = await newOrder(1);
+    const payment = await accepted(pay(order.orderId, userId, { scenario: "lost" }));
+    await agePayment(payment.paymentId);
+    // 조회 때는 아직 없었고, 무효로 하려 할 때는 결제사에 결제가 있다
+    const lookup = vi.spyOn(provider, "lookup").mockResolvedValueOnce({ status: "unknown" });
+    try {
+      await reconcilePayments(db, provider, log);
+    } finally {
+      lookup.mockRestore();
+    }
+    expect(await orderState(order.orderId)).toMatchObject({ status: "paid", payments: ["succeeded"], tickets: 1 });
+    expect(provider.isRefunded(payment.paymentId)).toBe(false);
+  });
+
+  it("4. 대사: 선점이 끝난 뒤 결제사에서 성공을 알게 되면 환불로 보내고, 다음 바퀴에 환불한다", async () => {
+    const { userId, order, hold } = await newOrder(1);
+    const payment = await accepted(pay(order.orderId, userId, { scenario: "lost" }));
+    await agePayment(payment.paymentId);
+    await expireHold(hold.holdId);
+    await reconcilePayments(db, provider, log);
+    expect(await orderState(order.orderId)).toMatchObject({ status: "cancelled", payments: ["refund_pending"] });
+    await runCleanup(db, provider, log);
+    expect((await orderState(order.orderId)).payments).toEqual(["refunded"]);
+  });
+
   it("4. 대사: 결제사에 닿지 않으면 건너뛰고 다음 번에 맞춘다", async () => {
     const { userId, order } = await newOrder(1);
     const payment = await accepted(pay(order.orderId, userId, { scenario: "lost" }));
@@ -337,7 +436,11 @@ describe("정리 작업", () => {
       }
       expect(await seatStatuses(performanceId, hold.seatIds)).toEqual(["available"]);
     } finally {
-      stop();
+      await stop();
     }
+    const after = await newHold(1);
+    await expireHold(after.hold.holdId);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(await seatStatuses(after.performanceId, after.hold.seatIds)).toEqual(["held"]);
   });
 });

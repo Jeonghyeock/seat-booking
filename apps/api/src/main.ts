@@ -22,7 +22,7 @@ paymentProvider.useTimers(app.log);
 // 정리 작업(만료 선점 풀기, 주문 취소, 환불, 대사, 멱등 키 지우기)을 10초마다 돌린다.
 const stopCleanup = startCleanupLoop(createDb(pool), paymentProvider, app.log);
 app.addHook("onClose", async () => {
-  stopCleanup();
+  await stopCleanup();
   await pool.end();
 });
 
