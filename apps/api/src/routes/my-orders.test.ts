@@ -73,13 +73,17 @@ describe("내 예매(GET /orders)", () => {
     }
   });
 
+  const markPaid = async (order: OrderView) => {
+    await pool.query("update orders set status = 'paid' where id = $1", [order.orderId]);
+    await pool.query("update performance_seats set status = 'sold' where hold_id = $1", [order.holdId]);
+    await insertPayment(order.orderId, "succeeded", order.amount);
+  };
+
   it("결제 대기·결제 완료·돈이 움직였을 수 있는 취소 주문만, 최근 것부터, 보이는 상태로 준다", async () => {
     const [userId, other] = await newSignedInUserIds(pool, 2);
     const pending = await newOrder(userId!);
     const paid = await newOrder(userId!);
-    await pool.query("update orders set status = 'paid' where id = $1", [paid.orderId]);
-    await pool.query("update performance_seats set status = 'sold' where hold_id = $1", [paid.holdId]);
-    await insertPayment(paid.orderId, "succeeded", paid.amount);
+    await markPaid(paid);
     const cancelledNoPayment = await newOrder(userId!);
     await cancel(cancelledNoPayment, userId!);
     const cancelledFailed = await newOrder(userId!);
@@ -94,6 +98,23 @@ describe("내 예매(GET /orders)", () => {
     const expiredRequested = await newOrder(userId!);
     await insertPayment(expiredRequested.orderId, "requested", expiredRequested.amount);
     await expireHold(expiredRequested);
+    // 넣는다: 취소 + 확인 중, 취소 + 환불 완료, 취소 + 환불 지연, 결제 완료 + 중복 결제 환불 중
+    const cancelledRequested = await newOrder(userId!);
+    await cancel(cancelledRequested, userId!);
+    await insertPayment(cancelledRequested.orderId, "requested", cancelledRequested.amount);
+    const refunded = await newOrder(userId!);
+    await cancel(refunded, userId!);
+    await insertPayment(refunded.orderId, "refunded", refunded.amount);
+    const refundFailed = await newOrder(userId!);
+    await cancel(refundFailed, userId!);
+    await insertPayment(refundFailed.orderId, "refund_failed", refundFailed.amount);
+    const paidDuplicate = await newOrder(userId!);
+    await markPaid(paidDuplicate);
+    await insertPayment(paidDuplicate.orderId, "refund_pending", paidDuplicate.amount);
+    // 뺀다: 선점 만료 + failed만
+    const expiredFailed = await newOrder(userId!);
+    await insertPayment(expiredFailed.orderId, "failed", expiredFailed.amount);
+    await expireHold(expiredFailed);
     // 다른 사용자의 주문은 보이지 않는다
     await newOrder(other!);
 
@@ -101,6 +122,10 @@ describe("내 예매(GET /orders)", () => {
     expect(hasMore).toBe(false);
     expect(Math.abs(Date.parse(serverTime) - Date.now())).toBeLessThan(60_000);
     expect(orders.map((o) => [o.orderId, o.status, o.cancelReason])).toEqual([
+      [paidDuplicate.orderId, "paid", null],
+      [refundFailed.orderId, "cancelled", "user"],
+      [refunded.orderId, "cancelled", "user"],
+      [cancelledRequested.orderId, "cancelled", "user"],
       [expiredRequested.orderId, "cancelled", "expired"],
       [refunding.orderId, "cancelled", "user"],
       [paid.orderId, "paid", null],
@@ -114,18 +139,22 @@ describe("내 예매(GET /orders)", () => {
     expect(first.payments.map((p) => p.status)).toEqual(["refund_pending", "failed"]);
     const shown = orders.find((o) => o.orderId === pending.orderId)!;
     expect(Date.parse(shown.holdExpiresAt) - Date.parse(shown.payBy)).toBe(30_000);
-    // 주문 조회와 같은 값이다
-    const view = OrderView.parse(
-      (await app.inject({ method: "GET", url: `/orders/${pending.orderId}`, headers: authHeaders(userId) })).json(),
-    );
-    expect(shown).toMatchObject({
-      status: view.status,
-      cancelReason: view.cancelReason,
-      amount: view.amount,
-      holdExpiresAt: view.holdExpiresAt,
-      payBy: view.payBy,
-      payments: view.payments,
-    });
+    // 목록의 주문마다 주문 조회와 같은 값이다(보이는 상태, 결제와 시각의 형식, 좌석 수)
+    for (const listed of orders) {
+      const view = OrderView.parse(
+        (await app.inject({ method: "GET", url: `/orders/${listed.orderId}`, headers: authHeaders(userId) })).json(),
+      );
+      expect(listed, String(listed.orderId)).toMatchObject({
+        performanceId: view.performanceId,
+        status: view.status,
+        cancelReason: view.cancelReason,
+        amount: view.amount,
+        holdExpiresAt: view.holdExpiresAt,
+        payBy: view.payBy,
+        payments: view.payments,
+        seatCount: view.items.length,
+      });
+    }
   });
 
   it("주문이 없으면 빈 목록이고, 100개를 넘으면 최근 100개와 hasMore다", async () => {

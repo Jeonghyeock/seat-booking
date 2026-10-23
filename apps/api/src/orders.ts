@@ -34,6 +34,9 @@ function shownStatus(order: {
   return { status: expired ? "cancelled" : order.status, cancelReason: expired ? "expired" : order.cancelReason };
 }
 
+// 선점이 지났는지. 주문 조회·내 예매의 보이는 상태와 내 예매의 거르기가 같은 조각을 쓴다(한쪽만 고쳐 어긋나지 않게).
+const holdExpired = sql<boolean>`${holds.expiresAt} < now()`;
+
 const payByOf = (holdExpiresAt: Date) => new Date(holdExpiresAt.getTime() - PAY_MARGIN_SECONDS * 1000).toISOString();
 
 // 주문 하나를 화면이 받는 모양으로 읽는다(DESIGN 6.2 "화면이 받는 것").
@@ -48,7 +51,7 @@ export async function loadOrderView(db: Db | Tx, orderId: number): Promise<Order
       cancelReason: orders.cancelReason,
       amount: orders.amount,
       holdExpiresAt: holds.expiresAt,
-      holdExpired: sql<boolean>`${holds.expiresAt} < now()`,
+      holdExpired,
       // tx.execute와 sql 조각은 timestamptz를 문자열로 돌려주므로, timestamptz 열의 변환으로 Date를 받는다.
       serverTime: sql`now()`.mapWith(holds.expiresAt),
     })
@@ -123,7 +126,7 @@ export async function listMyOrders(db: Db, userId: number): Promise<MyOrders> {
           cancelReason: orders.cancelReason,
           amount: orders.amount,
           holdExpiresAt: holds.expiresAt,
-          holdExpired: sql<boolean>`${holds.expiresAt} < now()`,
+          holdExpired,
           createdAt: orders.createdAt,
         })
         .from(orders)
@@ -132,7 +135,7 @@ export async function listMyOrders(db: Db, userId: number): Promise<MyOrders> {
           and(
             eq(orders.userId, userId),
             sql`(${orders.status} = 'paid'
-                  or (${orders.status} = 'pending' and ${holds.expiresAt} >= now())
+                  or (${orders.status} = 'pending' and not (${holdExpired}))
                   or exists (select 1 from ${payments} p where p.order_id = ${orders.id} and p.status <> 'failed'))`,
           ),
         )
@@ -167,6 +170,12 @@ export async function listMyOrders(db: Db, userId: number): Promise<MyOrders> {
       const summaries = await performanceSummaries(tx).where(inArray(performances.id, performanceIds));
 
       const performanceById = new Map(summaries.map((row) => [row.id, toSummary(row)]));
+      const paymentsByOrder = new Map<number, MyOrders["orders"][number]["payments"]>();
+      for (const { orderId, ...p } of paymentRows) {
+        const list = paymentsByOrder.get(orderId) ?? [];
+        list.push({ ...p, createdAt: p.createdAt.toISOString(), updatedAt: p.updatedAt.toISOString() });
+        paymentsByOrder.set(orderId, list);
+      }
       const seatsByOrder = new Map(seatCounts.map((row) => [row.orderId, row.seats]));
       return {
         orders: page.map((row) => ({
@@ -179,13 +188,7 @@ export async function listMyOrders(db: Db, userId: number): Promise<MyOrders> {
           holdExpiresAt: row.holdExpiresAt.toISOString(),
           payBy: payByOf(row.holdExpiresAt),
           createdAt: row.createdAt.toISOString(),
-          payments: paymentRows
-            .filter((p) => p.orderId === row.orderId)
-            .map(({ orderId: _, ...p }) => ({
-              ...p,
-              createdAt: p.createdAt.toISOString(),
-              updatedAt: p.updatedAt.toISOString(),
-            })),
+          payments: paymentsByOrder.get(row.orderId) ?? [],
         })),
         hasMore: rows.length > MY_ORDERS_PAGE_SIZE,
         serverTime,
