@@ -171,7 +171,8 @@ export type CancelOrderResult = { ok: true; view: OrderView } | { ok: false; cod
 // 이미 cancelled면 그대로 돌려준다(두 번 와도 결과가 같아 멱등 키를 받지 않는다). paid면 ORDER_NOT_CANCELLABLE.
 // 선점이 이미 만료됐으면 이유는 expired다. 주문 조회가 이미 cancelled(expired)로 보여 준 것과 같게 한다.
 // 진행 중인 결제(requested)가 있어도 취소한다. 그 결제가 나중에 성공하면 확정이 환불로 보낸다(화면은 취소 전에 그것을 알린다).
-// C5: 결제 확정과 겹치면 둘 다 주문 행을 먼저 잡는다. 취소가 이기면 확정은 pending이 아니라 환불로 가고, 확정이 이기면 취소는 409다.
+// C5: 결제 확정과 겹치면 둘 다 주문 행을 먼저 잡는다. 취소가 이기면 확정은 pending이 아니라 환불로 간다.
+// 확정이 이기면, paid로 바꿨으면 취소는 409이고, 선점이 만료돼 cancelled(expired)로 바꿨으면 취소는 그 주문으로 200이다.
 // 주문 행을 잡는 문장이 상태도 읽는다. 잠금을 기다렸다면 앞 트랜잭션이 바꾼 상태를 본다.
 export function cancelOrder(db: Db, orderId: number): Promise<CancelOrderResult> {
   return writeTransaction(db, async (tx) => {

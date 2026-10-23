@@ -114,6 +114,28 @@ describe("POST /orders/:id/cancel", () => {
     const again = await cancel(order.orderId, userId);
     expect(again.statusCode).toBe(200);
     expect(OrderView.parse(again.json())).toMatchObject({ status: "cancelled", cancelReason: "user" });
+
+    // 취소한 주문은 결제할 수 없다
+    const payRes = await app.inject({
+      method: "POST",
+      url: `/orders/${order.orderId}/payments`,
+      headers: { ...asUser(userId), "idempotency-key": randomUUID() },
+      payload: {},
+    });
+    expect(payRes.statusCode).toBe(409);
+    expect(payRes.json()).toMatchObject({ code: "ORDER_NOT_PAYABLE", reason: "CANCELLED" });
+  });
+
+  it("결제 마감은 지났지만 선점이 아직 유효하면 이유는 user다", async () => {
+    const { userId, order, hold: held } = await newOrder(1);
+    await admin.query("update holds set expires_at = now() + interval '10 seconds' where id = $1", [held.holdId]);
+    await admin.query("update performance_seats set hold_expires_at = now() + interval '10 seconds' where hold_id = $1", [
+      held.holdId,
+    ]);
+    expect(OrderView.parse((await cancel(order.orderId, userId)).json())).toMatchObject({
+      status: "cancelled",
+      cancelReason: "user",
+    });
   });
 
   it("결제가 끝난 주문은 409 ORDER_NOT_CANCELLABLE이다", async () => {
@@ -154,6 +176,27 @@ describe("POST /orders/:id/cancel", () => {
       expect((await cancelled).statusCode).toBe(409);
     });
     expect(await state(order.orderId)).toMatchObject({ status: "paid", payments: ["succeeded"], seats: ["sold", "sold"], tickets: 2 });
+  });
+
+  it("C5: 확정이 주문 행을 먼저 잡았는데 선점이 만료됐으면, 확정은 cancelled(expired)·환불로 바꾸고 취소는 그 주문으로 200이다", async () => {
+    const { userId, order, performanceId, hold: held } = await newOrder(2);
+    await pay(order.orderId, userId);
+    await admin.query("update holds set expires_at = now() - interval '1 second' where id = $1", [held.holdId]);
+    await admin.query("update performance_seats set hold_expires_at = now() - interval '1 second' where hold_id = $1", [
+      held.holdId,
+    ]);
+    await withHolder("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`hold:${userId}:${performanceId}`], async (release) => {
+      const delivered = provider.flush();
+      await waitForLockWaiters(1);
+      const cancelled = cancel(order.orderId, userId);
+      await waitForLockWaiters(2);
+      await release();
+      expect(await delivered).toEqual([200]);
+      const res = await cancelled;
+      expect(res.statusCode).toBe(200);
+      expect(OrderView.parse(res.json())).toMatchObject({ status: "cancelled", cancelReason: "expired" });
+    });
+    expect(await state(order.orderId)).toMatchObject({ status: "cancelled", cancel_reason: "expired", payments: ["refund_pending"], tickets: 0 });
   });
 
   it("C5: 취소가 주문 행을 먼저 잡으면 확정은 그 뒤에 줄을 서고, 취소된 주문이라 환불로 간다", async () => {
