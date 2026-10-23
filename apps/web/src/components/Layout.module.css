@@ -73,3 +73,9 @@
     padding: var(--space-4);
   }
 }
+
+/* 화면이 바뀔 때 옮겨 온 포커스(제목·본문)는 테두리를 그리지 않는다. 키보드로 옮긴 포커스는 그대로 보인다. */
+.main:focus,
+.main h1:focus {
+  outline: none;
+}

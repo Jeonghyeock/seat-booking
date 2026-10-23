@@ -60,17 +60,24 @@ export async function createOrderFor(holdId: number): Promise<number> {
 }
 
 // 결제 요청. "결제하기"를 누를 때마다 새 시도(새 키)이고, 같은 시도의 재시도는 저장한 키와 본문 그대로다.
-export async function requestPayment(orderId: number, body: PaymentRequest, { newAttempt }: { newAttempt: boolean }) {
+// 다시 보낼 때마다 onRetry를 부른다. 결제 행은 이미 requested라 화면은 주문을 다시 읽어 "결제 확인 중"을 보인다.
+export async function requestPayment(
+  orderId: number,
+  body: PaymentRequest,
+  { newAttempt, onRetry }: { newAttempt: boolean; onRetry?: () => void },
+) {
   const name = payAttemptName(orderId);
   const attempt = newAttempt ? startAttempt(name, body) : (readAttempt(name) ?? startAttempt(name, body));
   return (
-    await withRetry(() =>
-      apiRequest(`/orders/${orderId}/payments`, {
-        method: "POST",
-        body: attempt.body,
-        headers: { "idempotency-key": attempt.key },
-        schema: PaymentAccepted,
-      }),
+    await withRetry(
+      () =>
+        apiRequest(`/orders/${orderId}/payments`, {
+          method: "POST",
+          body: attempt.body,
+          headers: { "idempotency-key": attempt.key },
+          schema: PaymentAccepted,
+        }),
+      onRetry,
     )
   ).data;
 }

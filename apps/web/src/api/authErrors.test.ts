@@ -15,6 +15,7 @@ describe("인증 오류 → 할 일", () => {
     ["CSRF 거절은 화면 버그", error("/holds/1/orders", 403, "CSRF_REJECTED"), "bug"],
     ["그 밖의 409", error("/performances/1/holds", 409, "SEAT_UNAVAILABLE"), "none"],
     ["네트워크 오류", new NetworkError("/orders", new Error("x")), "none"],
+    ["감싼 오류 안의 401도 세션 만료", new Error("order stage", { cause: error("/holds/1/orders", 401, "UNAUTHENTICATED") }), "sessionExpired"],
   ])("%s", (_name, err, action) => {
     expect(authActionFor(err)).toBe(action);
   });

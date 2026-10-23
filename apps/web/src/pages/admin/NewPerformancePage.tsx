@@ -8,6 +8,7 @@ import { queryKeys } from "../../api/queries";
 import { LoadError, Loading } from "../../components/States";
 import { buildCreatePerformance, type FormErrors, type FormField, type PerformanceForm, problemsToErrors } from "../../lib/performanceForm";
 import { defaultSalesClose } from "../../lib/time";
+import { usePageTitle } from "../../lib/usePageTitle";
 import styles from "./Admin.module.css";
 
 const EMPTY: PerformanceForm = {
@@ -23,6 +24,7 @@ const EMPTY: PerformanceForm = {
 
 // 회차 등록(DESIGN 6.5 관리자). 공연장을 고르면 등급별 가격 칸이 생기고, 판매 종료는 고치기 전까지 공연 3시간 전을 따라간다.
 export function NewPerformancePage() {
+  usePageTitle("회차 등록");
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const ids = { show: useId(), venue: useId(), startsAt: useId(), salesOpenAt: useId(), salesCloseAt: useId() };

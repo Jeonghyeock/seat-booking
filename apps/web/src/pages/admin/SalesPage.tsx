@@ -3,6 +3,7 @@ import { Link } from "react-router";
 import { adminKeys, getSales } from "../../api/admin";
 import { LoadError, Loading } from "../../components/States";
 import { formatKst, formatWon } from "../../lib/time";
+import { usePageTitle } from "../../lib/usePageTitle";
 import styles from "./Admin.module.css";
 
 const PAYMENT_LABEL = {
@@ -16,6 +17,7 @@ const PAYMENT_LABEL = {
 
 // 회차 판매 현황(DESIGN 6.3 관리자 기능). 한 스냅샷에서 센 값이고, 판매 중에는 15초마다 다시 읽는다.
 export function SalesPage({ performanceId }: { performanceId: number }) {
+  usePageTitle("판매 현황");
   const sales = useQuery({
     queryKey: adminKeys.sales(performanceId),
     queryFn: () => getSales(performanceId),

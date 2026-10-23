@@ -36,7 +36,12 @@ describe("좌석 상태", () => {
 
   it("지도를 다시 읽으면 그사이 선점·판매·가격 없음이 된 좌석과 없어진 좌석을 고른 목록에서 뺀다", () => {
     const seats = [seat(1), seat(2, { status: "held" }), seat(3, { status: "sold" }), seat(4, { price: null })];
-    expect(reconcileSelection([1, 2, 3, 4, 9], seats, new Set())).toEqual({ kept: [1], dropped: [2, 3, 4, 9] });
+    expect(reconcileSelection([1, 2, 3, 4, 9], seats, new Set())).toEqual({ kept: [1], dropped: [2, 3, 4, 9], becameMine: [] });
+  });
+
+  it("방금 내 선점이 된 좌석은 다른 사람이 가져간 좌석과 따로 뺀다", () => {
+    const seats = [seat(1), seat(2, { status: "held" }), seat(3, { status: "held" })];
+    expect(reconcileSelection([1, 2, 3], seats, new Set([2]))).toEqual({ kept: [1], dropped: [3], becameMine: [2] });
   });
 
   it("구역·열은 응답 순서대로 묶는다", () => {

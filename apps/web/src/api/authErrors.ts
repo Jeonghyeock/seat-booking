@@ -12,6 +12,8 @@ export type AuthAction = "signedOut" | "sessionExpired" | "forbidden" | "bug" | 
 const FORM_PATHS = new Set(["/auth/login", "/auth/signup"]);
 
 export function authActionFor(error: unknown): AuthAction {
+  // 화면이 단계를 알리려고 감싼 오류(선점 뒤 주문 단계 등)는 안의 API 오류로 본다.
+  if (!(error instanceof ApiError) && error instanceof Error && error.cause instanceof ApiError) return authActionFor(error.cause);
   if (!(error instanceof ApiError)) return "none";
   if (FORM_PATHS.has(error.path)) return "none";
   if (error.status === 401) return error.path === "/auth/me" ? "signedOut" : "sessionExpired";

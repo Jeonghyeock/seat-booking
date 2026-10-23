@@ -1,5 +1,5 @@
 import type { SeatMapSeat } from "@seat-booking/shared";
-import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type KeyboardEvent, memo, useEffect, useMemo, useRef, useState } from "react";
 import { groupSeats, isSelectable, SEAT_STATE_LABEL, type SeatState, seatState } from "../lib/seats";
 import { formatWon } from "../lib/time";
 import styles from "./SeatGrid.module.css";
@@ -14,11 +14,12 @@ export function seatLabel(seat: SeatMapSeat, state: SeatState) {
   return `${seat.section} ${seat.row}열 ${seat.number}번, ${seat.grade} ${price}, ${SEAT_STATE_LABEL[state]}`;
 }
 
+// 글자 표시. 선점됨은 무늬(빗금)로 나누므로 글자를 두지 않는다.
 const STATE_MARK: Record<SeatState, string> = {
   available: "",
   selected: "✓",
   mine: "내",
-  held: "·",
+  held: "",
   sold: "×",
   unpriced: "?",
 };
@@ -33,7 +34,8 @@ type Props = {
   onToggle: (seatId: number) => void;
 };
 
-export function SeatGrid({ seats, selected, mine, open, gradeIndex, onToggle }: Props) {
+// 화면이 1초마다 다시 그려져도(타이머) 좌석이 바뀌지 않으면 다시 그리지 않는다. 넘기는 값은 부르는 쪽이 고정해 둔다.
+export const SeatGrid = memo(function SeatGrid({ seats, selected, mine, open, gradeIndex, onToggle }: Props) {
   const sections = useMemo(() => groupSeats(seats), [seats]);
   // 화살표로 옮길 때 쓰는 열 목록(구역을 건너 이어진다).
   const rows = useMemo(() => sections.flatMap((s) => s.rows.map((r) => r.seats)), [sections]);
@@ -93,7 +95,7 @@ export function SeatGrid({ seats, selected, mine, open, gradeIndex, onToggle }: 
       </div>
       {sections.map((section) => (
         <div key={section.section} className={styles.section}>
-          <h3 className={styles.sectionTitle}>{section.section}</h3>
+          <h2 className={styles.sectionTitle}>{section.section}</h2>
           {section.rows.map((row) => (
             <div key={row.row} role="group" aria-label={`${section.section} ${row.row}열`} className={styles.row}>
               <span className={styles.rowLabel} aria-hidden="true">
@@ -132,7 +134,7 @@ export function SeatGrid({ seats, selected, mine, open, gradeIndex, onToggle }: 
       ))}
     </div>
   );
-}
+});
 
 // 범례. 상태와 등급(가격)을 글자로도 보인다.
 export function SeatLegend({ grades }: { grades: { grade: string; price: number | null; index: number }[] }) {

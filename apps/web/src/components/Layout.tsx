@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef } from "react";
-import { Link, NavLink, Outlet, useNavigate } from "react-router";
+import { useEffect, useRef, useState } from "react";
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { logout as logoutRequest } from "../api/endpoints";
 import { clearUserQueries, queryKeys, useMe } from "../api/queries";
 import { clearAttempts } from "../lib/idempotency";
@@ -11,6 +11,8 @@ export function Layout() {
   const { data: me } = useMe();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const location = useLocation();
+  const main = useRef<HTMLElement>(null);
 
   // 다른 탭에서 로그아웃하거나 다른 계정으로 로그인하면, 창으로 돌아와 내 정보를 다시 읽을 때 사용자가 바뀐다.
   // 그때 앞 사용자의 캐시를 지운다.
@@ -22,17 +24,39 @@ export function Layout() {
     previousUserId.current = userId;
   }, [me, queryClient]);
 
+  // 화면이 바뀌면 새 화면의 제목(없으면 본문)으로 포커스를 옮긴다(화면 읽기 프로그램이 새 화면을 처음부터 읽게). 첫 화면은 그대로 둔다.
+  const firstPath = useRef(true);
+  useEffect(() => {
+    if (firstPath.current) {
+      firstPath.current = false;
+      return;
+    }
+    const heading = main.current?.querySelector("h1");
+    if (heading) {
+      heading.setAttribute("tabindex", "-1");
+      heading.focus();
+    } else {
+      main.current?.focus();
+    }
+  }, [location.pathname]);
+
+  // 로그아웃은 공개 화면으로 먼저 간 뒤에 한다(DESIGN 6.5). 로그인이 필요한 화면에서 내 정보를 먼저 비우면
+  // 그 화면이 로그인 화면으로 보내고, 그 화면의 조회가 401을 받는다.
+  const [loggingOut, setLoggingOut] = useState(false);
   const logout = useMutation({
     mutationFn: logoutRequest,
     onSettled: () => {
-      // 공개 화면으로 먼저 간 뒤 비운다(그려진 주문 화면이 다시 읽다가 401을 받지 않게).
-      void navigate("/", { replace: true });
       queryClient.setQueryData(queryKeys.me, null);
       queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== queryKeys.me[0] });
       clearAttempts();
       clearSelections();
     },
   });
+  useEffect(() => {
+    if (!loggingOut || location.pathname !== "/") return;
+    setLoggingOut(false);
+    logout.mutate();
+  }, [loggingOut, location.pathname, logout]);
 
   return (
     <div className={styles.shell}>
@@ -51,7 +75,14 @@ export function Layout() {
           {me ? (
             <>
               <span className={styles.email}>{me.email}</span>
-              <button type="button" onClick={() => logout.mutate()} disabled={logout.isPending}>
+              <button
+                type="button"
+                onClick={() => {
+                  setLoggingOut(true);
+                  void navigate("/", { replace: true });
+                }}
+                disabled={loggingOut || logout.isPending}
+              >
                 로그아웃
               </button>
             </>
@@ -60,7 +91,7 @@ export function Layout() {
           ) : null}
         </div>
       </header>
-      <main className={styles.main}>
+      <main ref={main} tabIndex={-1} className={styles.main}>
         <Outlet />
       </main>
     </div>

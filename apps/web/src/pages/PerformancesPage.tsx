@@ -6,6 +6,7 @@ import { LoadError, Loading } from "../components/States";
 import { type SalesState, salesState } from "../lib/seats";
 import { formatKst } from "../lib/time";
 import { useNow } from "../lib/useNow";
+import { usePageTitle } from "../lib/usePageTitle";
 import styles from "./PerformancesPage.module.css";
 
 // 공연 목록에는 serverTime이 없다. 판매 상태는 서버 시각을 받은 적이 있으면 그것으로, 없으면 PC 시계로 대강 보인다(DESIGN 6.5 시계).
@@ -23,6 +24,7 @@ function SalesBadge({ state, salesOpenAt, salesCloseAt }: { state: SalesState; s
 }
 
 export function PerformancesPage() {
+  usePageTitle("공연");
   const performances = useQuery({ queryKey: queryKeys.performances, queryFn: getPerformances });
   const now = useNow(30_000);
 
