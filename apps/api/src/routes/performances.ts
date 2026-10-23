@@ -1,10 +1,11 @@
 import { ErrorResponse, PerformanceList, PerformanceParams, SeatMap, type SeatStatus } from "@seat-booking/shared";
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
-import type { Db } from "../db/client.js";
+import type { Db, Tx } from "../db/client.js";
 import { performanceGrades, performanceSeats, performances, seats, shows, venues } from "../db/schema.js";
 
-function performanceSummaries(db: Db) {
+// 회차 요약(작품·공연장·시각)과 서버 시각. 관리자 판매 현황도 쓴다.
+export function performanceSummaries(db: Db | Tx) {
   return db
     .select({
       id: performances.id,
@@ -48,7 +49,7 @@ export function seatMapQuery(db: Db, performanceId: number) {
 }
 
 type SummaryRow = Awaited<ReturnType<typeof performanceSummaries>>[number];
-const toSummary = ({ serverTime: _, ...p }: SummaryRow) => ({
+export const toSummary = ({ serverTime: _, ...p }: SummaryRow) => ({
   ...p,
   startsAt: p.startsAt.toISOString(),
   salesOpenAt: p.salesOpenAt.toISOString(),

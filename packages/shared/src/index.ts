@@ -292,7 +292,7 @@ const Count = z.number().int().nonnegative();
 // 회차 판매 현황. 한 스냅샷에서 센다. 만료된 선점은 빈 좌석, 선점이 만료된 pending 주문은 cancelled다(좌석 지도·주문 조회와 같다).
 // revenue는 paid 주문 금액의 합이다. payments는 결제 상태마다 수다(0인 상태도 있다).
 export const PerformanceSales = z.object({
-  performanceId: z.number().int().positive(),
+  performance: PerformanceSummary,
   seats: z.object({ total: Count, available: Count, held: Count, sold: Count }),
   orders: z.object({ pending: Count, paid: Count, cancelled: Count }),
   revenue: Count,
@@ -305,11 +305,15 @@ export type PerformanceSales = z.infer<typeof PerformanceSales>;
 export const PaymentListQuery = z.object({ status: z.literal("refund_failed") });
 
 // 환불이 다섯 번 실패한 결제. 최근 바뀐 것부터 100개이고, 더 있으면 hasMore다.
+// providerRef는 결제사에서 그 결제를 찾는 번호다(결제사가 답하기 전에 끊겼으면 null).
 export const RefundFailedPayments = z.object({
   payments: z.array(
     z.object({
       paymentId: z.number().int().positive(),
+      providerRef: z.string().nullable(),
       orderId: z.number().int().positive(),
+      orderStatus: OrderStatus,
+      performanceId: z.number().int().positive(),
       userId: z.number().int().positive(),
       email: z.string(),
       amount: Count,
@@ -322,8 +326,12 @@ export const RefundFailedPayments = z.object({
 });
 export type RefundFailedPayments = z.infer<typeof RefundFailedPayments>;
 
-// 환불 다시 시도 200. 다음 정리 작업이 환불한다.
-export const RefundRetried = z.object({ paymentId: z.number().int().positive(), status: z.literal("refund_pending") });
+// 환불 다시 시도 200. 다음 정리 작업이 환불한다. changed가 false면 이미 환불 대기였다(두 번 눌렀거나 다른 관리자가 먼저 눌렀다).
+export const RefundRetried = z.object({
+  paymentId: z.number().int().positive(),
+  status: z.literal("refund_pending"),
+  changed: z.boolean(),
+});
 // 환불 다시 시도 409: 환불이 실패한 결제가 아니다(지금 상태를 함께 준다).
 export const PaymentNotRetryable = z.object({
   error: z.string(),

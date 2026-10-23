@@ -6,9 +6,17 @@ import {
   PaymentNotRetryable,
   PerformanceSales,
   RefundFailedPayments,
+  SeatMap,
 } from "@seat-booking/shared";
 import { afterAll, describe, expect, inject, it } from "vitest";
-import { authHeaders, newPerformance, newSignedInUserIds, newSignedInUsers } from "../../test/fixtures.js";
+import {
+  authHeaders,
+  expectUnauthenticated,
+  newPerformance,
+  newSignedInUserIds,
+  newSignedInUsers,
+  unauthenticatedHeaders,
+} from "../../test/fixtures.js";
 import { REFUND_FAILED_PAGE_SIZE } from "../admin.js";
 import { buildApp } from "../app.js";
 import { createPool } from "../db/pool.js";
@@ -27,24 +35,34 @@ describe("관리자 경로", () => {
   const post = (url: string, headers: Record<string, string>) => app.inject({ method: "POST", url, headers });
   const newAdmin = async () => (await newSignedInUsers(pool, 1, { role: "admin" }))[0]!;
 
-  it("관리자 범위의 경로는 모두 로그인하지 않았으면 401, 손님이면 403 FORBIDDEN이다", async () => {
+  it("/admin 경로는 모두 관리자 범위에 있다. 로그인하지 않았으면 401, 손님이면 403 FORBIDDEN이다(HEAD도)", async () => {
     await app.ready();
-    expect(app.adminRoutes.map((r) => `${r.method} ${r.url}`).sort()).toEqual([
+    const listed = (routes: { method: string; url: string }[]) => routes.map((r) => `${r.method} ${r.url}`).sort();
+    // 범위 밖에 /admin 경로를 잘못 등록하면(권한 확인 없이 열림) 여기서 걸린다.
+    const everyAdminUrl = app.allRoutes.filter((r) => r.url === "/admin" || r.url.startsWith("/admin/"));
+    expect(listed(app.adminRoutes)).toEqual(listed(everyAdminUrl));
+    expect(listed(app.adminRoutes)).toEqual([
       "GET /admin/payments",
       "GET /admin/performances/:id/sales",
       "POST /admin/payments/:id/retry-refund",
     ]);
+
+    const anonymous = await unauthenticatedHeaders(pool);
     const [customer] = await newSignedInUsers(pool, 1);
     for (const route of app.adminRoutes) {
       const url = route.url.replace(/:id/g, "1");
-      const method = route.method as "GET" | "POST";
-      const anonymous = await app.inject({ method, url, headers: { "x-requested-with": "seat-booking" } });
-      expect(anonymous.statusCode, url).toBe(401);
-      expect(AuthError.parse(anonymous.json()).code, url).toBe("UNAUTHENTICATED");
-      const forbidden = await app.inject({ method, url, headers: customer!.headers });
-      expect(forbidden.statusCode, url).toBe(403);
-      expect(AuthError.parse(forbidden.json()).code, url).toBe("FORBIDDEN");
-      expect(forbidden.headers["cache-control"], url).toBe("no-store");
+      const methods = (route.method === "GET" ? ["GET", "HEAD"] : [route.method]) as ("GET" | "HEAD" | "POST")[];
+      for (const method of methods) {
+        for (const [name, headers] of Object.entries(anonymous)) {
+          const res = await app.inject({ method, url, headers });
+          if (method === "HEAD") expect(res.statusCode, `${method} ${url} ${name}`).toBe(401);
+          else expectUnauthenticated(res, `${name}`);
+        }
+        const forbidden = await app.inject({ method, url, headers: customer!.headers });
+        expect(forbidden.statusCode, `${method} ${url}`).toBe(403);
+        expect(forbidden.headers["cache-control"], url).toBe("no-store");
+        if (method !== "HEAD") expect(AuthError.parse(forbidden.json()).code, url).toBe("FORBIDDEN");
+      }
     }
   });
 
@@ -85,9 +103,16 @@ describe("관리자 경로", () => {
       )
     ).rows[0].id as number;
 
-  it("판매 현황은 좌석·주문·매출·결제를 센다. 만료된 선점은 빈 좌석, 선점이 만료된 pending 주문은 cancelled다", async () => {
+  // 결제 확정(웹훅 대신 행을 바로 바꾼다).
+  async function markPaid(order: OrderView) {
+    await pool.query("update orders set status = 'paid' where id = $1", [order.orderId]);
+    await pool.query("update performance_seats set status = 'sold' where hold_id = $1", [order.holdId]);
+    await insertPayment(order.orderId, "succeeded", order.amount);
+  }
+
+  it("판매 현황은 좌석·주문·매출·결제를 센다. 좌석 지도·주문 조회와 같은 기준이고 다른 회차는 세지 않는다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
-    const [a, b, c, d] = await newSignedInUserIds(pool, 4);
+    const [a, b, c, d, e] = await newSignedInUserIds(pool, 5);
     const active = await newOrder(performanceId, a!, seatIds.slice(0, 2));
     const expired = await newOrder(performanceId, b!, seatIds.slice(2, 3));
     const paid = await newOrder(performanceId, c!, seatIds.slice(3, 6));
@@ -98,20 +123,23 @@ describe("관리자 경로", () => {
     await pool.query("update performance_seats set hold_expires_at = now() - interval '1 second' where hold_id = $1", [
       expired.holdId,
     ]);
-    // 결제 확정
-    await pool.query("update orders set status = 'paid' where id = $1", [paid.orderId]);
-    await pool.query("update performance_seats set status = 'sold' where hold_id = $1", [paid.holdId]);
-    await insertPayment(paid.orderId, "succeeded", paid.amount);
+    await markPaid(paid);
     // 사용자 취소, 그 뒤 늦게 성공한 결제의 환불이 실패했다
     expect((await post(`/orders/${cancelled.orderId}/cancel`, authHeaders(d))).statusCode).toBe(200);
     await insertPayment(cancelled.orderId, "refund_failed", cancelled.amount);
     await insertPayment(active.orderId, "failed", active.amount);
 
+    // 다른 회차의 판매는 세지 않는다
+    const other = await newPerformance(pool);
+    const otherOrder = await newOrder(other.performanceId, e!, other.seatIds.slice(0, 4));
+    await markPaid(otherOrder);
+    await insertPayment(otherOrder.orderId, "refund_pending", otherOrder.amount);
+
     const res = await get(`/admin/performances/${performanceId}/sales`, (await newAdmin()).headers);
     expect(res.statusCode).toBe(200);
     const sales = PerformanceSales.parse(res.json());
     expect(sales).toEqual({
-      performanceId,
+      performance: expect.objectContaining({ id: performanceId, showTitle: expect.any(String), venueName: expect.any(String) }),
       seats: { total: seatIds.length, available: seatIds.length - 5, held: 2, sold: 3 },
       orders: { pending: 1, paid: 1, cancelled: 2 },
       revenue: paid.amount,
@@ -119,6 +147,24 @@ describe("관리자 경로", () => {
       serverTime: expect.any(String),
     });
     expect(Math.abs(Date.parse(sales.serverTime) - Date.now())).toBeLessThan(60_000);
+
+    // 좌석 지도의 상태별 수, 주문 조회의 상태와 같다
+    const seatMap = SeatMap.parse((await get(`/performances/${performanceId}/seats`, {})).json());
+    const byStatus = (status: string) => seatMap.seats.filter((s) => s.status === status).length;
+    expect({ available: byStatus("available"), held: byStatus("held"), sold: byStatus("sold") }).toEqual({
+      available: sales.seats.available,
+      held: sales.seats.held,
+      sold: sales.seats.sold,
+    });
+    const shown = [];
+    for (const [order, user] of [[active, a], [expired, b], [paid, c], [cancelled, d]] as const) {
+      shown.push(OrderView.parse((await get(`/orders/${order.orderId}`, authHeaders(user))).json()).status);
+    }
+    expect({
+      pending: shown.filter((s) => s === "pending").length,
+      paid: shown.filter((s) => s === "paid").length,
+      cancelled: shown.filter((s) => s === "cancelled").length,
+    }).toEqual(sales.orders);
   });
 
   it("판매가 없는 회차는 모두 0이고, 없는 회차는 404다", async () => {
@@ -132,21 +178,22 @@ describe("관리자 경로", () => {
     expect((await get("/admin/performances/999999999/sales", admin.headers)).statusCode).toBe(404);
   });
 
-  it("환불 실패 목록은 최근 바뀐 것부터 100개와 hasMore이고, 사용자 이메일과 시도 횟수를 준다. status는 refund_failed만 받는다", async () => {
+  it("환불 실패 목록은 최근 바뀐 것부터 100개와 hasMore이고, 결제사 번호·주문 상태·회차·사용자 이메일·시도 횟수를 준다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
     const [buyer] = await newSignedInUserIds(pool, 1);
     const order = await newOrder(performanceId, buyer!, seatIds.slice(0, 1));
     // 이 테스트의 결제가 맨 앞에 오게 바뀐 시각을 미래로 둔다(다른 테스트의 환불 실패와 섞이지 않게)
     await pool.query(
-      `insert into payments (order_id, status, amount, idempotency_key, refund_attempts, updated_at)
-       select $1, 'refund_failed', $2, gen_random_uuid()::text, 5, now() + interval '1 day' + g * interval '1 second'
+      `insert into payments (order_id, status, amount, idempotency_key, refund_attempts, provider_ref, updated_at)
+       select $1, 'refund_failed', $2, gen_random_uuid()::text, 5, gen_random_uuid()::text,
+              now() + interval '1 day' + g * interval '1 second'
          from generate_series(1, $3) g`,
       [order.orderId, order.amount, REFUND_FAILED_PAGE_SIZE + 1],
     );
-    const { rows } = await pool.query("select id from payments where order_id = $1 order by updated_at desc limit 1", [
-      order.orderId,
-    ]);
-    const newest = rows[0].id;
+    const { rows } = await pool.query(
+      "select id, provider_ref from payments where order_id = $1 order by updated_at desc limit 1",
+      [order.orderId],
+    );
     const { rows: users } = await pool.query("select email from users where id = $1", [buyer]);
 
     const admin = await newAdmin();
@@ -156,8 +203,11 @@ describe("관리자 경로", () => {
     expect(list.payments).toHaveLength(REFUND_FAILED_PAGE_SIZE);
     expect(list.hasMore).toBe(true);
     expect(list.payments[0]).toMatchObject({
-      paymentId: newest,
+      paymentId: rows[0].id,
+      providerRef: rows[0].provider_ref,
       orderId: order.orderId,
+      orderStatus: "pending",
+      performanceId,
       userId: buyer,
       email: users[0].email,
       amount: order.amount,
@@ -170,24 +220,24 @@ describe("관리자 경로", () => {
     expect((await get("/admin/payments", admin.headers)).statusCode).toBe(400);
   });
 
-  it("환불 다시 시도는 refund_failed를 refund_pending·시도 0으로 바꾸고 로그에 남긴다. 두 번 눌러도 200이다", async () => {
+  it("환불 다시 시도는 refund_failed를 refund_pending·시도 0으로 바꾸고 로그에 남긴다. 두 번 눌러도 200이고 changed로 나뉜다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
     const [buyer] = await newSignedInUserIds(pool, 1);
     const order = await newOrder(performanceId, buyer!, seatIds.slice(0, 1));
     const paymentId = await insertPayment(order.orderId, "refund_failed", order.amount);
     const admin = await newAdmin();
 
-    for (let i = 0; i < 2; i++) {
+    for (const changed of [true, false]) {
       const res = await post(`/admin/payments/${paymentId}/retry-refund`, admin.headers);
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ paymentId, status: "refund_pending" });
+      expect(res.json()).toEqual({ paymentId, status: "refund_pending", changed });
     }
     const { rows } = await pool.query("select status, refund_attempts from payments where id = $1", [paymentId]);
     expect(rows[0]).toEqual({ status: "refund_pending", refund_attempts: 0 });
     const logged = logs.filter((line) => line.msg === "관리자: 환불 다시 시도" && line.paymentId === paymentId);
-    expect(logged.map((line) => [line.adminId, line.changed])).toEqual([
-      [admin.id, true],
-      [admin.id, false],
+    expect(logged.map((line) => [line.adminId, line.result])).toEqual([
+      [admin.id, { ok: true, changed: true }],
+      [admin.id, { ok: true, changed: false }],
     ]);
   });
 

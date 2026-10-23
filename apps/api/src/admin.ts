@@ -1,32 +1,39 @@
 import type { PerformanceSales, RefundFailedPayments } from "@seat-booking/shared";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, ne, sql } from "drizzle-orm";
 import { deleteUserSessions, normalizeEmail } from "./auth.js";
-import type { Db } from "./db/client.js";
+import { type Db, writeTransaction } from "./db/client.js";
 import { holds, orders, PAYMENT_STATUSES, payments, performanceSeats, performances, users } from "./db/schema.js";
+import { performanceSummaries, toSummary } from "./routes/performances.js";
 
 // 관리자 기능(DESIGN 6.3 역할·관리자 기능).
 
 // ── 관리자로 올리기(admin:promote) ──
 
 export type PromoteResult =
-  | { ok: true; userId: number; alreadyAdmin: boolean }
+  | { ok: true; userId: number; createdAt: Date; alreadyAdmin: boolean }
   | { ok: false; reason: "NOT_FOUND" | "NO_PASSWORD" };
 
 // 가입한 계정을 관리자로 올리고 그 사용자의 세션을 모두 지운다. 손님으로 만든 7일짜리 세션이 관리자 세션으로 남지 않게 한다.
-// 동시에 로그인해 만드는 세션은 createSession이 사용자 행을 FOR SHARE로 읽으므로, 이 트랜잭션이 끝난 뒤의 역할(관리자 12시간)로 만든다.
-// 비밀번호가 없는 계정(4단계 전에 만든 사용자)은 로그인할 수 없으므로 거절한다.
+// 역할을 먼저 바꾸고 세션을 지운다. 동시에 로그인해 만드는 세션은 createSession이 사용자 행을 FOR SHARE로 읽으므로,
+// 역할을 바꾼 뒤에는 이 트랜잭션이 끝나기를 기다려 관리자 12시간으로 만든다(순서를 바꾸면 지운 뒤 손님 세션이 들어갈 수 있다).
+// 비밀번호가 없는 계정(4단계 전에 만든 사용자)은 로그인할 수 없으므로 거절한다. 가입 시각을 돌려줘 명령이 보여 준다
+// (이메일 확인이 없으므로, 남이 먼저 가입한 주소인지 운영자가 볼 수 있게). 잠금 대기 3초·문장 5초 제한 안에서 한다.
 export async function promoteToAdmin(db: Db, email: string): Promise<PromoteResult> {
-  return db.transaction(async (tx) => {
+  return writeTransaction(db, async (tx) => {
     const [user] = await tx
-      .select({ id: users.id, role: users.role, passwordHash: users.passwordHash })
+      .select({ id: users.id, passwordHash: users.passwordHash, createdAt: users.createdAt })
       .from(users)
       .where(eq(users.email, normalizeEmail(email)));
     if (!user) return { ok: false, reason: "NOT_FOUND" };
     if (user.passwordHash === null) return { ok: false, reason: "NO_PASSWORD" };
-    if (user.role === "admin") return { ok: true, userId: user.id, alreadyAdmin: true };
-    await tx.update(users).set({ role: "admin" }).where(eq(users.id, user.id));
-    await deleteUserSessions(tx, user.id);
-    return { ok: true, userId: user.id, alreadyAdmin: false };
+    // 동시에 두 번 올려도 한쪽만 바꾼다. 다른 쪽은 이미 관리자로 본다.
+    const [changed] = await tx
+      .update(users)
+      .set({ role: "admin" })
+      .where(and(eq(users.id, user.id), ne(users.role, "admin")))
+      .returning({ id: users.id });
+    if (changed) await deleteUserSessions(tx, user.id);
+    return { ok: true, userId: user.id, createdAt: user.createdAt, alreadyAdmin: !changed };
   });
 }
 
@@ -35,15 +42,14 @@ export async function promoteToAdmin(db: Db, email: string): Promise<PromoteResu
 type PaymentCounts = Record<(typeof PAYMENT_STATUSES)[number], number>;
 
 // 회차의 좌석·주문·매출·결제를 한 스냅샷(repeatable read)에서 센다. 따로 읽으면 그사이 확정이 커밋되어 좌석과 주문 수가 어긋난다.
-// 만료된 선점은 빈 좌석으로, 선점이 만료된 pending 주문은 cancelled로 센다(좌석 지도·주문 조회와 같다). now()는 스냅샷을 잡은 시각이다.
+// 만료된 선점은 빈 좌석으로, 선점이 만료된 pending 주문은 cancelled로 센다(좌석 지도·주문 조회와 같다).
+// now()는 트랜잭션을 시작한 시각이고 스냅샷은 첫 질의에서 잡는다. 그 한 번의 왕복 사이에 정리 작업이 만료된 선점을 풀면
+// 좌석은 빈 좌석인데 주문은 pending으로 셀 수 있다. 드물고 다음 조회에서 맞으므로 받아들인다.
 // 매출은 paid 주문 금액의 합이다(paid 주문은 취소할 수 없다). 결제 수는 0인 상태도 채운다. 없는 회차면 undefined다.
 export async function loadPerformanceSales(db: Db, performanceId: number): Promise<PerformanceSales | undefined> {
   return db.transaction(
     async (tx) => {
-      const [performance] = await tx
-        .select({ serverTime: sql`now()`.mapWith(performances.startsAt) })
-        .from(performances)
-        .where(eq(performances.id, performanceId));
+      const [performance] = await performanceSummaries(tx).where(eq(performances.id, performanceId));
       if (!performance) return undefined;
 
       const heldAlive = sql`${performanceSeats.status} = 'held' and ${performanceSeats.holdExpiresAt} >= now()`;
@@ -63,8 +69,8 @@ export async function loadPerformanceSales(db: Db, performanceId: number): Promi
           pending: sql<number>`count(*) filter (where ${pendingAlive})::int`,
           paid: sql<number>`count(*) filter (where ${orders.status} = 'paid')::int`,
           cancelled: sql<number>`count(*) filter (where ${orders.status} <> 'paid' and not (${pendingAlive}))::int`,
-          // 합은 bigint라 pg가 문자열로 돌려준다.
-          revenue: sql`coalesce(sum(${orders.amount}) filter (where ${orders.status} = 'paid'), 0)`.mapWith(Number),
+          // 합은 bigint다. pool의 INT8 파서가 number로 바꾼다(안전한 정수 범위를 넘으면 던진다).
+          revenue: sql<number>`coalesce(sum(${orders.amount}) filter (where ${orders.status} = 'paid'), 0)`,
         })
         .from(orders)
         .innerJoin(holds, eq(holds.id, orders.holdId))
@@ -82,7 +88,7 @@ export async function loadPerformanceSales(db: Db, performanceId: number): Promi
 
       const { revenue, ...orderStatusCounts } = orderCounts!;
       return {
-        performanceId,
+        performance: toSummary(performance),
         seats: seats!,
         orders: orderStatusCounts,
         revenue,
@@ -104,7 +110,10 @@ export async function listRefundFailed(db: Db): Promise<RefundFailedPayments> {
   const rows = await db
     .select({
       paymentId: payments.id,
+      providerRef: payments.providerRef,
       orderId: payments.orderId,
+      orderStatus: orders.status,
+      performanceId: holds.performanceId,
       userId: orders.userId,
       email: users.email,
       amount: payments.amount,
@@ -114,6 +123,7 @@ export async function listRefundFailed(db: Db): Promise<RefundFailedPayments> {
     })
     .from(payments)
     .innerJoin(orders, eq(orders.id, payments.orderId))
+    .innerJoin(holds, eq(holds.id, orders.holdId))
     .innerJoin(users, eq(users.id, orders.userId))
     .where(sql`${payments.status} = 'refund_failed'`)
     .orderBy(desc(payments.updatedAt), desc(payments.id))
