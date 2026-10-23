@@ -80,8 +80,8 @@
 | `holds` | user_id, performance_id, expires_at | 선점 묶음. 요청 하나로 잡은 좌석들이 같은 hold를 가리킨다 |
 | `orders` | user_id, hold_id(unique), status, amount, cancel_reason, created_at, updated_at | pending / paid / cancelled. 선점 하나에 주문 하나. amount는 order_items 가격의 합 |
 | `order_items` | (order_id, seat_id) PK, price | 주문할 때의 좌석과 가격. 결제 확정 때 이 좌석이 모두 남았는지 본다. 취소·만료로 좌석의 hold_id가 비어도 주문이 어떤 좌석이었는지 남는다 |
-| `payments` | id, order_id, provider_ref(unique, nullable), status, amount, idempotency_key, created_at, updated_at | requested / succeeded / failed / refund_pending / refunded. 결제 시도마다 한 행이고 결제사를 부르기 **전에** 넣는다. id가 결제사 쪽 멱등 키다. 부분 unique `(order_id) WHERE status = 'requested'`(진행 중인 결제는 주문당 하나)와 `(order_id) WHERE status = 'succeeded'` |
-| `payment_webhooks` | event_id(unique), payment_id, type, result, body, received_at | 받은 웹훅을 먼저 넣는다(inbox). 같은 이벤트의 재전송을 event_id로 거르고, 모르는 결제의 웹훅(unmatched)도 버리지 않고 남긴다 |
+| `payments` | id, order_id, provider_ref, status, amount, idempotency_key, refund_attempts, created_at, updated_at | requested / succeeded / failed / refund_pending / refunded. 결제 시도마다 한 행이고 결제사를 부르기 **전에** 넣는다. id가 결제사 쪽 멱등 키다. `provider_ref`는 나중에 채우므로 부분 unique `WHERE provider_ref IS NOT NULL`. `(order_id, idempotency_key)` unique(같은 키로 결제 행이 둘 생기지 않게), 부분 unique `(order_id) WHERE status = 'requested'`(진행 중인 결제는 주문당 하나)와 `(order_id) WHERE status = 'succeeded'` |
+| `payment_webhooks` | event_id(unique), payment_id(외래 키 없음), type, result, body, received_at | 받은 웹훅을 처리와 같은 트랜잭션에서 넣는다(inbox). 같은 이벤트의 재전송을 event_id로 거르고, 모르는 결제의 웹훅(unmatched)도 버리지 않고 남긴다 |
 | `tickets` | order_id, performance_id, seat_id, status | **부분 unique 인덱스** `(performance_id, seat_id) WHERE status = 'valid'`. 3단계에는 valid만 생긴다(결제 후 취소가 없다, 10장 22) |
 | `idempotency_keys` | (user_id, route, key) PK, request_hash, status, owner_token, response_code, response_body, created_at, updated_at | processing / done. 24시간 보관(6.2) |
 | `outbox_events` | type, payload, created_at, sent_at | 8단계(분석 프로젝트 연결). 그 전에는 만들지 않는다 |
@@ -99,7 +99,7 @@
 | ③ 조건부 `UPDATE` | `UPDATE performance_seats SET status='held', … WHERE performance_id=$1 AND seat_id=$2 AND (status='available' OR (status='held' AND hold_expires_at < now())) RETURNING seat_id` | **채택.** 한 문장 안에서 확인과 수정을 함께 한다. 두 요청이 겹치면 뒤 요청은 앞 요청이 끝날 때까지 기다린 뒤 바뀐 행으로 조건을 다시 보고, 0행을 받는다(READ COMMITTED에서 PostgreSQL의 동작) |
 | ④ DB 불변식 | `tickets`의 부분 unique 인덱스 | ③과 **함께** 둔다. 앱 코드에 버그가 있어도 DB가 중복 판매를 거부한다 |
 
-- 만료를 부분 인덱스 조건에 넣을 수 없는 이유: 인덱스 조건의 함수는 IMMUTABLE이어야 하는데 `now()`는 그렇지 않다. 그래서 만료는 ③의 `WHERE`에서 판단하고, 정리 작업이 만료된 선점을 주기적으로 풀어 좌석 지도의 숫자를 맞춘다. 정리 작업은 `FOR UPDATE SKIP LOCKED`로 몇 행씩 처리한다.
+- 만료를 부분 인덱스 조건에 넣을 수 없는 이유: 인덱스 조건의 함수는 IMMUTABLE이어야 하는데 `now()`는 그렇지 않다. 그래서 만료는 ③의 `WHERE`에서 판단하고, 정리 작업이 만료된 선점을 주기적으로 풀어 좌석 지도의 숫자를 맞춘다. 정리 작업은 `FOR UPDATE SKIP LOCKED`로 최대 500행씩 처리한다(6.2).
 - **여러 좌석을 한 번에 선점한다.** 요청 하나는 1~4석을 전부 잡거나 하나도 잡지 않는다. 한 트랜잭션 안에서 대상 좌석을 좌석 id 순서로 `FOR UPDATE` 잠그고, 같은 문장에서 ③의 조건부 `UPDATE`를 한다. 바뀐 행 수가 요청한 좌석 수보다 적으면 `ROLLBACK`하고 409를 돌려준다.
 - **교착을 막는 잠금 순서.** 두 요청이 좌석 1과 3을 서로 반대 순서로 잠그면, 각자 하나를 쥔 채 상대의 것을 기다려 교착(40P01)이 된다. PostgreSQL은 `deadlock_timeout`(기본 1초) 뒤 한쪽을 실패시킨다. 모든 요청이 좌석 id 순서로 잠그면 기다림이 고리를 이루지 않는다. 1인 한도를 지키려고 사용자 단위 잠금을 더하면, 그 잠금은 좌석 잠금보다 **먼저** 잡는다. 순서가 "사용자 → 좌석 id 순" 하나뿐이라 고리가 생기지 않는다.
 - **만료 시각을 좌석 재고 행에도 두는 이유.** READ COMMITTED에서 겹친 `UPDATE`는 앞 트랜잭션이 끝날 때까지 기다린 뒤, 고치려는 행의 새 값으로 `WHERE`를 다시 본다. 이때 다른 표는 문장을 시작할 때의 스냅샷으로 본다. 만료 시각이 `holds`에만 있으면 조건이 `holds`를 봐야 하는데, 앞 트랜잭션이 막 넣은 선점은 그 스냅샷에 없다. 조건을 "유효한 선점이 없으면"처럼 쓰면 두 요청이 모두 선점한다. 그래서 만료 판단에 쓰는 값을 같은 행(`hold_expires_at`)에 둔다. 두 곳의 값은 같은 트랜잭션에서 한 번 쓰고 바꾸지 않는다(선점 연장은 없다).
@@ -136,8 +136,8 @@
 | 표 | 상태 | 전이 |
 |---|---|---|
 | `orders` | pending, paid, cancelled | pending → paid(결제 확정), pending → cancelled(사용자 취소, 선점 만료). paid·cancelled는 끝 상태 |
-| `payments` | requested, succeeded, failed, refund_pending, refunded | requested → succeeded(확정함)·failed(웹훅)·refund_pending(성공 웹훅이 왔지만 주문을 확정할 수 없음), refund_pending → refunded(환불 작업) |
-| `payment_webhooks` | processed, ignored, unmatched | 받은 웹훅을 먼저 넣고(이벤트 id unique) 처리 결과를 적는다 |
+| `payments` | requested, succeeded, failed, refund_pending, refunded | requested → succeeded(확정함)·failed(실패 웹훅, 대사)·refund_pending(성공 웹훅이 왔지만 주문을 확정할 수 없음), failed → refund_pending(failed 뒤에 성공 웹훅이 옴. 돈을 받았으니 돌려준다), refund_pending → refunded(환불 작업) |
+| `payment_webhooks` | processed, ignored, unmatched | 받은 웹훅을 처리와 같은 트랜잭션에서 넣는다(이벤트 id unique). 처리가 되돌려지면 이 행도 사라져, 재전송 때 다시 처리한다 |
 | `tickets` | valid | 결제 확정 때 좌석마다 한 장 |
 
 초안의 주문 상태 `refunded`는 결제로 옮겼다. 확정하지 못해 돌려주는 돈은 주문이 아니라 그 결제의 일이고, 결제 후 취소(환불 요청)는 v1에서 하지 않는다(10장 22).
@@ -146,11 +146,19 @@
 
 | 경로 | 잡는 순서 |
 |---|---|
-| 결제 요청 | 주문 → 결제 행 INSERT |
-| 결제 확정(웹훅) | 주문 → 결제 → advisory → 좌석 |
+| 주문 생성 | 선점·좌석은 잠그지 않고 읽는다 → 주문 INSERT(같은 선점의 다른 주문이 있으면 `hold_id` unique에서 기다린다) |
+| 결제 요청 A | 주문 → 결제 행 INSERT |
+| 결제 요청 B(`provider_ref` 채우기) | 결제만 |
+| 웹훅 받기 | 웹훅 행 INSERT(같은 이벤트가 처리 중이면 `event_id` unique에서 기다린다) → 결제 확정·실패 반영 |
+| 결제 확정(웹훅, 대사) | 주문 → 결제 → advisory → 좌석 |
+| 실패 반영 | 주문 → 결제 |
 | 취소 | 주문 → 좌석 |
 | 선점(2단계) | advisory → 좌석 |
-| 정리 작업 | 단계마다 한 가지만, `SKIP LOCKED`라 기다리지 않는다 |
+| 정리 1·2(좌석 풀기, 주문 취소) | 한 가지만. `SKIP LOCKED`라 기다리지 않는다 |
+| 환불 | 결제만. 결제사를 부르는 동안에는 트랜잭션도 잠금도 쥐지 않는다 |
+| 대사 | 후보는 잠그지 않고 고르고 결제사 조회는 트랜잭션 밖. 반영은 결제 확정·실패 반영과 같다 |
+
+웹훅 행에서 결제 행으로 외래 키를 두지 않는다. 모르는 결제의 웹훅도 남겨야 하고, 외래 키 확인 잠금(`FOR KEY SHARE`)이 결제 행 갱신과 부딪히지 않게 하려는 것이다(리뷰 실험 E6). `provider_ref`는 부분 unique(`WHERE provider_ref IS NOT NULL`)라 나중에 채워도 외래 키가 가리킬 수 있는 열이 아니어서, 채우는 `UPDATE`가 `FOR NO KEY UPDATE` 강도에 머문다.
 
 결제 요청·결제 확정·취소가 모두 주문 행에서 먼저 줄을 선다. 같은 주문의 두 번째 결제 요청이 첫 결제의 확정과 겹치면, 결제 행의 부분 unique 인덱스를 기다리는 쪽과 주문 행을 기다리는 쪽이 고리를 이뤄 교착(40P01)이 된다(리뷰 실험 E2). 주문 행을 먼저 잡으면 그 고리가 생기지 않는다.
 
@@ -170,18 +178,23 @@
 
 **결제 요청.** 결제사를 부르기 전에 결제 행부터 넣는다.
 
-1. 트랜잭션 A: 주문 행을 잡고, pending이고 내 것이고 선점이 만료 전인지 본다. 진행 중인 결제(requested)가 있으면 `PAYMENT_IN_PROGRESS`다(부분 unique 인덱스가 마지막 방어다). 결제 행(requested, 금액, 이 요청의 멱등 키)을 넣고 커밋한다. 결제 id는 DB가 만든다.
-2. 가짜 결제사를 부른다. 결제 id를 결제사 쪽 멱등 키로 넘기므로, 같은 id로 다시 부르면 같은 결제를 돌려준다. 결제사는 자기 결제 번호(`provider_ref`)를 준다.
-3. 트랜잭션 B: `provider_ref`를 채운다(`WHERE provider_ref IS NULL`. 웹훅이 먼저 와서 채웠으면 그대로 둔다).
+1. 트랜잭션 A: 주문 행을 잡는다. 먼저 이 주문에서 **같은 멱등 키로 만든 결제를 상태와 상관없이** 찾는다(`payments(order_id, idempotency_key)` unique). 있으면 새로 만들지 않는다. requested면 그 결제 id로 2부터 다시 하고, 다른 상태면 그 결제로 처음과 같은 202를 돌려준다. 이 규칙은 다시 보낸 요청에도 넘겨받은 요청에도 같다(C4: 결제 행 1개). 없을 때만 주문이 pending이고 내 것이고 선점이 만료 전인지 본다. 다른 키로 만든 진행 중인 결제(requested)가 있으면 `PAYMENT_IN_PROGRESS`다(부분 unique 인덱스가 마지막 방어다). 결제 행(requested, 금액, 이 요청의 멱등 키)을 넣고 커밋한다. 결제 id는 DB가 만든다.
+2. 가짜 결제사를 부른다. 결제 id를 결제사 쪽 멱등 키로 넘기므로, 같은 id로 다시 부르면 같은 결제를 돌려준다. 결제사는 자기 결제 번호(`provider_ref`)를 준다. 결제사 호출에는 따로 시간 제한(3초)을 둔다(`statement_timeout`은 DB 밖의 기다림을 막지 않는다).
+3. 트랜잭션 B: `provider_ref`를 채운다(`WHERE provider_ref IS NULL`. 웹훅이 먼저 와서 채웠으면 0행이고 그대로 둔다). 0행이어도 202 응답과 멱등 응답은 그대로 저장한다.
 
 결제 행을 먼저 커밋하므로, 웹훅이 결제 요청의 응답보다 먼저 와도 결제 행이 있다. 결제사를 부른 뒤 서버가 죽어 3을 못 했거나 2가 실패해도, 결제 행은 남고 아래 대사 작업이 같은 결제 id로 다시 묻는다.
 
 **웹훅 받기.** 웹훅 본문에는 결제사 이벤트 id, 우리 결제 id, `provider_ref`, 종류(`payment.succeeded`·`payment.failed`·그 밖의 중간 상태)가 있다.
 
 1. 서명을 확인한다(`X-Fake-Signature`, 본문의 HMAC-SHA256). 틀리면 401.
-2. `payment_webhooks`에 이벤트 id로 `INSERT … ON CONFLICT DO NOTHING`. 0행이면 같은 이벤트의 재전송이다. 200을 돌려주고 끝낸다. 결제사는 200을 받을 때까지 다시 보내므로, 무시할 때도 200이어야 한다.
-3. 결제 id로 결제 행을 찾는다. 없거나, 끝 상태(failed·succeeded)를 다른 끝 상태로 바꾸려는 이벤트면 unmatched로 적고 경보 로그를 남긴다(결제사는 끝 상태를 바꾸지 않는다고 약속한다). 중간 상태 같은 모르는 종류는 ignored로 적는다. 둘 다 200이다.
-4. 종류에 따라 아래 결제 확정이나 실패 반영을 하고, 같은 트랜잭션에서 웹훅 행을 processed로 바꾼다.
+2. 웹훅 행 넣기와 처리를 **한 트랜잭션**에서 한다. `payment_webhooks`에 이벤트 id로 `INSERT … ON CONFLICT DO NOTHING`이 0행이면 이미 처리한 이벤트다. 200을 돌려주고 끝낸다. 처리가 되돌려졌다면(40P01, 시간 제한, 서버 중단) 웹훅 행도 함께 사라졌으므로 재전송 때 다시 처리된다. 같은 이벤트가 동시에 두 번 오면 두 번째는 unique 인덱스에서 첫 번째가 끝나길 기다린 뒤 0행을 받는다. 결제사는 200을 받을 때까지 다시 보내므로, 무시할 때도 200이어야 한다.
+3. 결제 id로 결제 행을 찾는다.
+   - 없으면 unmatched로 적고 경보 로그를 남긴다(받은 id는 본문째 남긴다).
+   - failed인 결제에 succeeded가 오면(대사가 failed로 정한 뒤 결제사 쪽에서 늦게 성공함 등) 돈을 받았으므로 refund_pending으로 보내고 경보 로그를 남긴다.
+   - succeeded·refund_pending·refunded인 결제에 failed가 오면 unmatched로 적고 경보 로그를 남긴다(결제사는 끝 상태를 바꾸지 않는다고 약속한다).
+   - 중간 상태 같은 모르는 종류는 ignored로 적는다.
+   - 모두 200이다.
+4. 종류에 따라 아래 결제 확정이나 실패 반영을 하고, 웹훅 행을 processed로 적는다.
 
 **결제 확정(payment.succeeded).** 한 트랜잭션에서 잠금 순서대로 잡는다.
 
@@ -199,12 +212,12 @@
 
 **취소.** 주문 행을 잡고 pending → cancelled(user)로 바꾼 뒤, 이 선점의 `held` 좌석을 `seat_id` 순서로 잠가 `available`로 되돌린다(`status`·`hold_id`·`hold_expires_at`을 한 `UPDATE`에서 함께 비워 CHECK 두 개와 맞춘다). 이미 cancelled면 그대로 200, paid면 409다.
 
-**정리 작업.** 같은 프로세스에서 주기적으로 돈다(10초). 테스트에서는 끄고 함수를 직접 부른다. 단계마다 따로 트랜잭션이고, 한 번에 최대 500행씩 처리한다. 모두 `SKIP LOCKED`라 잠긴 행을 기다리지 않고 건너뛴다.
+**정리 작업.** 같은 프로세스에서 주기적으로 돈다(10초). 테스트에서는 끄고 함수를 직접 부른다. 단계마다 따로 트랜잭션이고, 한 번에 최대 500행씩 처리한다. 1·2는 `SKIP LOCKED`라 잠긴 행을 기다리지 않고 건너뛴다. 3·4는 결제사를 부르는 동안 트랜잭션도 행 잠금도 쥐지 않는다(대사가 결제 행을 잠근 채 주문을 기다리면 웹훅 확정과 교착한다. 리뷰 실험 E5).
 
 1. 좌석 풀기: `status = 'held' AND hold_expires_at < now()`인 좌석을 `FOR UPDATE SKIP LOCKED`로 골라 `available`로 되돌린다.
 2. 주문 취소: 선점이 만료된 pending 주문을 `FOR NO KEY UPDATE SKIP LOCKED`로 골라 cancelled(expired)로 바꾼다.
-3. 환불: refund_pending 결제를 가짜 결제사에 환불 요청하고(결제 id가 결제사 쪽 멱등 키라 다시 불러도 한 번만 환불된다), 응답을 받은 뒤 refunded로 바꾼다. 결제사를 부른 뒤 바꾸기 전에 죽어도 다음 번에 다시 부르면 된다.
-4. 대사: 10분 넘게 requested인 결제를 가짜 결제사에 묻는다. 결과가 있으면 웹훅을 받은 것처럼 반영하고, 결제사가 모르는 결제(호출 전에 죽음)면 failed로 바꾼다.
+3. 환불: refund_pending 결제를 잠그지 않고 고른다. 가짜 결제사에 환불을 요청하고(결제 id가 환불의 멱등 키라 다시 불러도 한 번만 환불된다), 성공하면 새 트랜잭션에서 `WHERE status = 'refund_pending'`으로 refunded로 바꾼다. 결제사를 부른 뒤 바꾸기 전에 죽어도 다음 번에 다시 부르면 된다. 결제사가 그 결제를 모르면(가짜 결제사를 다시 띄움) 시도 횟수(`refund_attempts`)를 늘리고, 다섯 번이 넘으면 경보 로그를 남기고 더 시도하지 않는다.
+4. 대사: 1분 넘게 requested인 결제를 잠그지 않고 고른다. 선점(5분) 안에 웹훅을 잃은 결제를 맞추려고 선점보다 짧게 둔다. 트랜잭션 밖에서 가짜 결제사에 묻고, 결과가 있으면 새 트랜잭션에서 웹훅과 같은 함수로 반영한다(주문 → 결제, `status = 'requested'`일 때만). 결제사가 모르는 결제(결제사를 부르기 전에 죽음)면, 먼저 결제사에 그 결제 id를 무효(void)로 해 두고 failed로 바꾼다. 무효로 해 두지 않으면 넘겨받은 요청이 그 뒤에 같은 id로 결제를 만들어, 돈만 받고 결제는 failed로 남을 수 있다.
 5. 24시간 지난 멱등 키를 지운다.
 
 SKIP LOCKED는 다른 트랜잭션이 잠근 행을 기다리지 않고 건너뛴다. 결제 확정이 잡고 있는 좌석은 이번에 건너뛰고, 확정이 sold로 바꾸면 다음 번에도 대상이 아니다. 확정이 만료를 보고 환불로 갔다면 좌석은 held로 남아 다음 번에 풀린다.
@@ -215,7 +228,7 @@ SKIP LOCKED는 다른 트랜잭션이 잠근 행을 기다리지 않고 건너�
 - 확정이 먼저: 좌석이 `sold`가 된다. 정리는 잠긴 행을 건너뛰고, 다음 번에는 `held`가 아니라 대상이 아니다.
 - 정리가 돌기 전에 만료가 지났다: 확정은 `statement_timestamp()`로 만료를 보고 환불로 간다.
 
-좌석이 두 번 팔리지 않는다. 받은 돈은 좌석으로 바뀌거나(succeeded) 환불로 간다(refund_pending → refunded).
+좌석이 두 번 팔리지 않는다. 받은 돈은 좌석으로 바뀌거나(succeeded) 환불로 간다(refund_pending → refunded). failed로 정한 결제에 성공이 늦게 와도 환불로 간다(웹훅 받기 3).
 
 **C5: 취소와 결제 확정이 겹칠 때.** 둘 다 주문 행을 먼저 잡는다. 취소가 이기면 확정의 3에서 pending이 아니라 결제 refund_pending. 확정이 이기면 취소는 409 `ORDER_NOT_CANCELLABLE`.
 
@@ -226,30 +239,31 @@ SKIP LOCKED는 다른 트랜잭션이 잠근 행을 기다리지 않고 건너�
    - request_hash가 다르면 422(같은 키를 다른 요청에 썼다).
    - done이면 저장한 응답을 그대로 돌려준다(C4: 차례로 다시 보낸 요청).
    - processing이면 409 `IN_PROGRESS`와 `Retry-After`(C4: 동시에 보낸 두 번째 요청).
-   - processing인데 `updated_at`이 1분 넘게 지났으면(처리 중에 서버가 죽음) 따로 커밋하는 트랜잭션에서 `owner_token`을 새것으로 바꿔 넘겨받는다(`WHERE owner_token = 옛것`이라 둘이 동시에 넘겨받지 못한다).
+   - processing인데 `updated_at`이 1분 넘게 지났으면(처리 중에 서버가 죽음) 따로 커밋하는 트랜잭션에서 `owner_token`을 새것으로, `updated_at`을 지금으로 바꿔 넘겨받는다(`WHERE owner_token = 옛것`이라 둘이 동시에 넘겨받지 못하고, `updated_at`을 바꾸므로 세 번째 요청이 곧바로 다시 넘겨받지 못한다).
 3. 업무 트랜잭션의 끝에서 같은 트랜잭션으로 응답을 저장하고 done으로 바꾼다. `WHERE owner_token = 내 것 AND status = 'processing'`이 0행이면(누가 넘겨받았다) 예외를 던져 업무까지 되돌리고, 저장된 응답이 있으면 그것을 돌려준다.
-4. 업무가 되돌려지며 4xx로 끝나면(2단계처럼 예외로 되돌린다) 업무 트랜잭션 밖에서 응답을 저장한다. 다시 보내도 결과가 같은 4xx(`HOLD_EXPIRED`, `ORDER_EXISTS`, `PRICE_MISSING`, `ORDER_NOT_PAYABLE`)만 저장한다. 시간이 지나면 풀리는 것(`PAYMENT_IN_PROGRESS`)과 5xx는 키 행을 지워 다시 보낼 수 있게 한다. 저장·삭제도 `owner_token`이 내 것일 때만 한다.
-5. 결제 요청은 결제사를 트랜잭션 밖에서 부른다. 넘겨받은 요청은 같은 멱등 키로 만든 requested 결제가 있으면 새로 만들지 않고, 그 결제 id로 결제사를 다시 부른다.
-6. 이 두 경로에는 문장·잠금 대기 시간 제한(`statement_timeout`, `lock_timeout`)을 둔다. 넘겨받기 기준(1분)은 이보다 길어야, 아직 살아 있는 요청을 넘겨받지 않는다(2단계에서 미룬 시간 제한 중 이 부분을 3단계에서 정한다).
+4. 업무가 되돌려지며 4xx로 끝나면(2단계처럼 예외로 되돌린다) 업무 트랜잭션 밖에서 응답을 저장한다. 다시 보내도 결과가 같은 4xx(`HOLD_EXPIRED`, `ORDER_EXISTS`, `PRICE_MISSING`, `ORDER_NOT_PAYABLE`)만 저장한다. 시간이 지나면 풀리는 것(`PAYMENT_IN_PROGRESS`)과 5xx는 키 행을 지워 다시 보낼 수 있게 한다. 저장·삭제도 `owner_token`이 내 것이고 status가 processing일 때만 한다. 커밋한 뒤 응답을 만들다 5xx가 나도 done 행을 지우지 않게 하려는 것이다.
+5. 결제 요청은 결제사를 트랜잭션 밖에서 부른다. 같은 키의 결제를 먼저 찾는 규칙(결제 요청 1)이 모든 요청에 걸리므로, 다시 보낸 요청이든 넘겨받은 요청이든 결제 행을 하나 더 만들지 않는다.
+6. 3단계의 쓰기 경로(주문 생성, 결제 요청, 웹훅, 취소, 정리)에는 문장·잠금 대기 시간 제한을 둔다(`statement_timeout` 5초, `lock_timeout` 3초). 결제 확정은 advisory lock을 기다리는 동안 주문 행을 쥐고 있을 수 있어서다. 넘겨받기 기준(1분)은 이 제한과 결제사 호출 제한(3초)보다 길다. 살아 있는 요청을 넘겨받더라도 `owner_token`과 결제 id 멱등 덕분에 결과는 틀리지 않고 일만 늘어난다(2단계에서 미룬 시간 제한 중 이 부분을 3단계에서 정한다).
 7. request_hash는 경로의 id와 본문을 키 순서를 맞춘 JSON으로 만들어 SHA-256으로 잰다. 공백·키 순서만 다른 같은 요청을 다른 요청으로 보지 않는다.
 
 키를 업무와 같은 트랜잭션에 넣는 방법도 있다. 같은 키의 두 번째 요청은 unique 인덱스에서 첫 요청이 끝날 때까지 기다리고, 처리 중 행이 남지 않는다. 대신 중복 요청마다 연결을 쥐고 기다리고, 결제사 호출 같은 바깥 일을 트랜잭션 안에서 해야 한다. 그래서 별도 트랜잭션으로 먼저 넣는다(10장 23).
 
 **가짜 결제사.** 같은 서버 안의 모듈이고, 바깥 결제사처럼 다룬다.
 
-- 결제 만들기(결제 id가 멱등 키), 결제 조회, 환불(결제 id가 멱등 키) 세 가지를 준다.
+- 결제 만들기, 결제 조회, 무효(void), 환불 네 가지를 준다. 만들기·무효·환불은 결제 id가 멱등 키이고, 작업마다 키를 따로 본다. 무효로 한 결제 id로는 결제를 만들 수 없다.
 - 결제 요청 본문의 `scenario`로 상황을 고른다(10장 20). `delayMs`(기본 1000)는 웹훅까지의 지연이다.
   - `success`: succeeded 한 번.
   - `fail`: failed 한 번.
   - `duplicate`: 같은 이벤트를 거의 동시에 두 번.
   - `out_of_order`: succeeded를 먼저 보내고, 그보다 앞서 생긴 중간 상태 이벤트를 나중에 보낸다(ignored).
   - `early`: 웹훅을 결제 요청의 응답보다 먼저 보낸다(결제 행을 먼저 커밋하는 이유).
-  - `lost`: 웹훅을 보내지 않는다(대사 작업이 찾는다).
+  - `lost`: 웹훅을 보내지 않는다(대사 작업이 1분 뒤 찾는다).
 - 웹훅은 앱의 HTTP 경로로 보낸다(개발은 자기 `PORT`로 `fetch`, 테스트는 `app.inject`). 함수를 바로 부르지 않아 서명 확인·검증·응답까지 경로째 시험한다. 2xx를 받지 못하면 1·2·4·8·16초 뒤 다시 보낸다(다섯 번).
+- 웹훅 본문은 `X-Fake-Signature` 헤더(본문의 HMAC-SHA256)로 서명한다. 비밀은 환경 변수이고 테스트는 고정값이다.
 - 테스트에서는 타이머를 쓰지 않는다. 쌓인 웹훅을 원하는 순서로 직접 보내고, 핸들러를 일부러 실패시켜 재전송도 본다.
 - 상태는 메모리에만 둔다. 서버를 다시 띄우면 가짜 결제사의 기록과 보내지 못한 웹훅이 사라진다(실제 결제사는 자기 쪽에 남긴다). 우리 쪽은 대사 작업이 requested 결제를 다시 물어 맞춘다.
 
-**인덱스.** 정리 1 `performance_seats(hold_expires_at) WHERE status = 'held'`, 정리 2 `orders(hold_id) WHERE status = 'pending'`, 마지막 결제 찾기 `payments(order_id, created_at)`, 대사 `payments(created_at) WHERE status = 'requested'`, 표 `tickets(order_id)`, 멱등 키 지우기 `idempotency_keys(created_at)`.
+**인덱스.** 정리 1 `performance_seats(hold_expires_at) WHERE status = 'held'`, 정리 2 `orders(hold_id) WHERE status = 'pending'`, 마지막 결제 찾기 `payments(order_id, created_at)`, 같은 키의 결제 찾기 `payments(order_id, idempotency_key)` unique, 대사 `payments(created_at) WHERE status = 'requested'`, 환불 `payments(created_at) WHERE status = 'refund_pending'`, 표 `tickets(order_id)`, 멱등 키 지우기 `idempotency_keys(created_at)`.
 
 **PR 순서.** 스키마(표와 제약·인덱스, 공유 zod 스키마) → 판매 기간·팔린 좌석 한도(2단계에서 미룬 것) → 주문 생성과 멱등 키 → 가짜 결제사·결제 요청·웹훅·결제 확정(C4) → 정리 작업(C3, 환불, 대사) → 취소(C5) → 기록.
 
@@ -346,8 +360,10 @@ seat-booking/
 21. `Idempotency-Key`는 주문 생성과 결제 요청에 받는다. 24시간 보관한다. (사용자 결정)
 22. 주문 상태에서 `refunded`를 빼고 결제 상태(refund_pending → refunded)로 옮긴다. 결제 후 취소(환불 요청)는 v1에서 하지 않는다. (제안, 6.2)
 23. 멱등 키는 별도 트랜잭션으로 먼저 넣고, 응답은 업무 트랜잭션 안에서 저장한다. 키 행에 `owner_token`을 두어 저장·삭제·넘겨받기를 그 요청만 하게 하고, 1분 넘게 처리 중인 키는 넘겨받는다. 키는 사용자와 경로마다 따로다. (제안, 6.2. 설계 리뷰 M2·L3 반영)
-24. 잠금 순서는 주문 → 결제 → 사용자·회차 advisory lock → 좌석(`seat_id` 순). 정리 작업은 SKIP LOCKED로 기다리지 않고 단계마다 따로 처리한다. (제안, 6.2. 처음 안은 결제 → 주문이었으나, 같은 주문의 두 번째 결제 요청과 교착(40P01)이 나는 것을 설계 리뷰가 실험으로 보였다)
+24. 잠금 순서는 주문 → 결제 → 사용자·회차 advisory lock → 좌석(`seat_id` 순). 정리 1·2는 SKIP LOCKED로 기다리지 않고, 환불·대사는 결제사를 부르는 동안 아무것도 쥐지 않는다. (제안, 6.2. 처음 안은 결제 → 주문이었으나, 같은 주문의 두 번째 결제 요청과 교착(40P01)이 나는 것을 설계 리뷰가 실험으로 보였다. 대사가 결제 행을 잠근 채 주문을 기다리는 교착도 실험으로 보였다)
 25. 결제 행은 결제사를 부르기 전에 넣고 커밋한다. 결제 id가 결제사 쪽 멱등 키다. 웹훅이 결제 요청의 응답보다 먼저 와도 결제 행이 있다. (설계 리뷰 H1)
-26. 받은 웹훅은 `payment_webhooks`(이벤트 id unique)에 먼저 넣는다. 재전송은 이벤트 id로 거르고, 모르는 결제의 웹훅도 남겨 경보를 낸다. 서명이 맞으면 늘 200이다. (설계 리뷰 H1·L9)
+26. 받은 웹훅은 처리와 같은 트랜잭션에서 `payment_webhooks`(이벤트 id unique)에 넣는다. 재전송은 이벤트 id로 거르고, 처리가 되돌려지면 웹훅 행도 사라져 재전송 때 다시 처리한다. 모르는 결제의 웹훅도 남겨 경보를 내고(결제 행으로 외래 키를 두지 않는다), 서명이 맞으면 늘 200이다. (설계 리뷰 H1·L9·R4·R6)
 27. 결제 확정은 좌석을 sold로 바꾸기 전에 사용자·회차 advisory lock을 잡고, 만료를 `statement_timestamp()`로 본다. 늦게 실행된 확정이 1인 한도를 넘기지 않게 한다. (설계 리뷰 M1, 실험 E3)
-28. 환불과 대사는 DB에 남긴 상태(refund_pending, 오래된 requested)를 정리 작업이 결제사에 다시 물어 맞춘다. 가짜 결제사는 메모리에만 상태를 두고, 웹훅을 2xx를 받을 때까지 다섯 번 다시 보낸다. (설계 리뷰 M3)
+28. 환불과 대사는 DB에 남긴 상태(refund_pending, 1분 넘은 requested)를 정리 작업이 결제사에 다시 물어 맞춘다. 대사는 결제사가 모르는 결제를 먼저 무효(void)로 해 둔 뒤 failed로 바꾸고, failed 결제에 성공 웹훅이 오면 환불로 보낸다. 환불은 다섯 번 실패하면 경보를 남기고 멈춘다. 가짜 결제사는 메모리에만 상태를 두고, 웹훅을 2xx를 받을 때까지 다섯 번 다시 보낸다. (설계 리뷰 M3·R2·R8)
+29. 결제 요청은 이 주문에서 같은 멱등 키로 만든 결제를 상태와 상관없이 먼저 찾는다(`payments(order_id, idempotency_key)` unique). 결제사 호출이 실패한 뒤 같은 키로 다시 보내도, 넘겨받은 요청이어도 결제 행을 하나 더 만들지 않는다. (설계 리뷰 R3)
+30. 3단계의 쓰기 경로에는 `statement_timeout` 5초, `lock_timeout` 3초, 결제사 호출에는 3초 제한을 둔다. 멱등 키 넘겨받기 기준(1분)은 이보다 길다. (설계 리뷰 M2·R7, 2단계에서 미룬 시간 제한의 일부)
