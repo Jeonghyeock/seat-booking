@@ -39,7 +39,7 @@ describe("3단계 표의 제약", () => {
   const insertItem = (orderId: number, seatId: number, price = 50000) =>
     pool.query("insert into order_items (order_id, seat_id, price) values ($1, $2, $3)", [orderId, seatId, price]);
 
-  const insertPayment = (orderId: number, status: string, key = randomUUID(), amount = 100000) =>
+  const insertPayment = (orderId: number, status: string, key: string = randomUUID(), amount = 100000) =>
     pool.query<{ id: number }>(
       "insert into payments (order_id, status, amount, idempotency_key) values ($1, $2, $3, $4) returning id",
       [orderId, status, amount, key],
