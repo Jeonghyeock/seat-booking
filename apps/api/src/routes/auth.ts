@@ -61,14 +61,16 @@ export const authRoutes: FastifyPluginAsyncZod<{ db: Db; config: AuthConfig }> =
     reply.code(503).header("retry-after", "1").send({ error: "잠시 뒤 다시 시도해 주세요", code: "TRY_AGAIN_LATER" });
 
   // 새 세션을 만들고 쿠키를 굽는다. 요청에 이미 세션 쿠키가 있으면 그 세션은 지운다(DESIGN 6.3 세션).
+  // 세션을 만들 때 읽은 역할을 돌려준다. 응답은 이 역할을 쓴다(앞서 읽은 역할은 그사이 승격으로 바뀌었을 수 있다).
   async function signIn(request: FastifyRequest, reply: FastifyReply, userId: number) {
     const previous = request.cookies[cookieName];
     if (previous !== undefined) await deleteSession(db, previous);
-    const { token, expiresAt } = await createSession(db, userId);
+    const { token, expiresAt, role } = await createSession(db, userId);
     reply.setCookie(cookieName, token, {
       ...sessionCookieOptions(config),
       maxAge: Math.max(0, Math.floor((expiresAt.getTime() - Date.now()) / 1000)),
     });
+    return role;
   }
 
   app.post(
@@ -108,11 +110,11 @@ export const authRoutes: FastifyPluginAsyncZod<{ db: Db; config: AuthConfig }> =
         .insert(users)
         .values({ email, passwordHash })
         .onConflictDoNothing({ target: users.email })
-        .returning({ id: users.id, email: users.email, role: users.role });
+        .returning({ id: users.id, email: users.email });
       if (!created) return taken();
 
-      await signIn(request, reply, created.id);
-      return reply.code(201).send({ userId: created.id, email: created.email, role: created.role });
+      const role = await signIn(request, reply, created.id);
+      return reply.code(201).send({ userId: created.id, email: created.email, role });
     },
   );
 
@@ -140,7 +142,7 @@ export const authRoutes: FastifyPluginAsyncZod<{ db: Db; config: AuthConfig }> =
       if (password === null) return invalid();
 
       const [user] = await db
-        .select({ id: users.id, email: users.email, role: users.role, passwordHash: users.passwordHash })
+        .select({ id: users.id, email: users.email, passwordHash: users.passwordHash })
         .from(users)
         .where(eq(users.email, request.body.email));
       let matched: boolean;
@@ -164,8 +166,8 @@ export const authRoutes: FastifyPluginAsyncZod<{ db: Db; config: AuthConfig }> =
           if (!(err instanceof PasswordHasherBusy)) throw err;
         }
       }
-      await signIn(request, reply, user.id);
-      return { userId: user.id, email: user.email, role: user.role };
+      const role = await signIn(request, reply, user.id);
+      return { userId: user.id, email: user.email, role };
     },
   );
 

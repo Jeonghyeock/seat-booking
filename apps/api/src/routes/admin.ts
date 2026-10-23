@@ -43,7 +43,7 @@ export const adminRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db }
     async () => listRefundFailed(db),
   );
 
-  // 누가 어느 결제를 다시 시도하게 했는지 로그에 남긴다.
+  // 누가 어느 결제를 다시 시도하게 했는지 결과와 함께 로그에 남긴다.
   app.post(
     "/payments/:id/retry-refund",
     {
@@ -55,14 +55,14 @@ export const adminRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db }
     async (request, reply) => {
       const paymentId = request.params.id;
       const result = await retryRefund(db, paymentId);
+      request.log.info({ adminId: currentUser(request).id, paymentId, result }, "관리자: 환불 다시 시도");
       if (!result.ok) {
         if (result.code === "NOT_FOUND") return reply.code(404).send({ error: "결제를 찾을 수 없습니다" });
         return reply
           .code(409)
           .send({ error: "환불이 실패한 결제만 다시 시도할 수 있습니다", code: result.code, status: result.status });
       }
-      request.log.info({ adminId: currentUser(request).id, paymentId, changed: result.changed }, "관리자: 환불 다시 시도");
-      return { paymentId, status: "refund_pending" as const };
+      return { paymentId, status: "refund_pending" as const, changed: result.changed };
     },
   );
 };

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { HoldResponse, OrderView, PaymentAccepted, PaymentProviderUnavailable } from "@seat-booking/shared";
 import { afterAll, describe, expect, inject, it, vi } from "vitest";
 import { authHeaders, newPerformance, newSignedInUserIds, newSignedInUsers } from "../test/fixtures.js";
+import { retryRefund } from "./admin.js";
 import { buildApp } from "./app.js";
 import {
   cancelExpiredOrders,
@@ -253,6 +254,22 @@ describe("정리 작업", () => {
     await refundPayments(db, provider, log);
     expect(await attempts()).toEqual({ status: "refund_failed", refund_attempts: 5 });
     expect(log.error).toHaveBeenCalledWith(expect.objectContaining({ paymentId }), expect.any(String));
+  });
+
+  it("3. 환불: 관리자가 다시 시도하게 한 refund_failed 결제는 다음 정리 작업이 환불한다", async () => {
+    const { userId, order } = await newOrder(1);
+    const payment = await accepted(pay(order.orderId, userId));
+    expect(await provider.flush()).toEqual([200]);
+    // 결제사가 그 결제를 한동안 몰라 다섯 번 실패했다고 둔다
+    await admin.query("update payments set status = 'refund_failed', refund_attempts = 5 where id = $1", [
+      payment.paymentId,
+    ]);
+    expect(await retryRefund(db, payment.paymentId)).toEqual({ ok: true, changed: true });
+
+    await refundPayments(db, provider, log);
+    const { rows } = await admin.query("select status from payments where id = $1", [payment.paymentId]);
+    expect(rows[0].status).toBe("refunded");
+    expect(provider.isRefunded(payment.paymentId)).toBe(true);
   });
 
   it("3. 환불: 두 정리 작업이 겹쳐 같은 결제에 '모른다'를 받아도 시도 횟수는 한 번만 는다", async () => {

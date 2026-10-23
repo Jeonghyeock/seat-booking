@@ -106,28 +106,32 @@ export function newSessionToken() {
 }
 
 // 세션을 만든다. 이 사용자의 세션은 방금 만든 것과 그 밖의 최근 것을 합쳐 MAX_SESSIONS_PER_USER개만 남긴다.
-// 만료는 넣는 순간의 역할로 정한다. 호출자가 앞서 읽은 역할을 쓰면, 그사이 관리자로 올린 사용자가 7일짜리 세션을 받는다.
-// 사용자 행은 FOR SHARE로 읽는다. 관리자로 올리는 트랜잭션(역할 바꾸기 + 세션 모두 지우기)과 겹치면 그것이 끝난 뒤의 역할로 정한다.
-// 잠그지 않으면 문장을 시작할 때의 역할(손님)로 7일짜리 세션을 만들고, 그 세션은 승격이 세션을 지운 뒤에 들어가 남는다.
+// 만료는 넣는 순간의 역할로 정하고, 그 역할을 함께 돌려준다(로그인 응답의 역할이 세션과 같게). 호출자가 앞서 읽은 역할을 쓰면,
+// 그사이 관리자로 올린 사용자가 7일짜리 세션을 받는다.
+// 사용자 행은 FOR SHARE로 읽어 세션을 넣을 때까지 쥔다. 관리자로 올리는 트랜잭션(역할 바꾸기 + 세션 모두 지우기)과 겹치면,
+// 승격이 먼저면 끝나기를 기다려 관리자 역할로 만들고, 이쪽이 먼저면 승격이 이 세션까지 지운다. 잠그지 않으면 손님 역할로
+// 7일짜리 세션을 만들고, 그 세션이 승격이 세션을 지운 뒤에 들어가 남는다(DESIGN 10장 64).
 export async function createSession(db: Db | Tx, userId: number) {
   const { token, tokenHash } = newSessionToken();
-  const ttl = sql`case (select role from users where id = ${userId} for share)
-                    when 'admin' then ${SESSION_TTL_SECONDS.admin}::int else ${SESSION_TTL_SECONDS.customer}::int end`;
-  const [created] = await db
-    .insert(sessions)
-    .values({ tokenHash, userId, expiresAt: sql`now() + make_interval(secs => ${ttl})` })
-    .returning({ expiresAt: sessions.expiresAt });
-  await db.execute(sql`
-    delete from sessions
-     where user_id = ${userId}
-       and token_hash <> ${tokenHash}
-       and token_hash not in (
-         select token_hash from sessions where user_id = ${userId} and token_hash <> ${tokenHash}
-          order by created_at desc, token_hash
-          limit ${MAX_SESSIONS_PER_USER - 1}
-       )
-  `);
-  return { token, expiresAt: created!.expiresAt };
+  return db.transaction(async (tx) => {
+    const [user] = await tx.select({ role: users.role }).from(users).where(eq(users.id, userId)).for("share");
+    if (!user) throw new Error(`없는 사용자의 세션을 만들려 했습니다: ${userId}`);
+    const [created] = await tx
+      .insert(sessions)
+      .values({ tokenHash, userId, expiresAt: sql`now() + make_interval(secs => ${SESSION_TTL_SECONDS[user.role]}::int)` })
+      .returning({ expiresAt: sessions.expiresAt });
+    await tx.execute(sql`
+      delete from sessions
+       where user_id = ${userId}
+         and token_hash <> ${tokenHash}
+         and token_hash not in (
+           select token_hash from sessions where user_id = ${userId} and token_hash <> ${tokenHash}
+            order by created_at desc, token_hash
+            limit ${MAX_SESSIONS_PER_USER - 1}
+         )
+    `);
+    return { token, expiresAt: created!.expiresAt, role: user.role };
+  });
 }
 
 // 쿠키의 토큰으로 만료 전 세션과 사용자를 찾는다. 역할은 요청마다 users에서 읽으므로 바꾸면 바로 적용된다.

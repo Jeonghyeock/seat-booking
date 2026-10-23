@@ -97,6 +97,8 @@ describe("세션", () => {
     // 만료는 넣는 순간 users의 역할로 정한다
     const a = await createSession(db, admin!);
     expect(c.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    // 만료를 정한 역할을 함께 돌려준다(로그인 응답이 쓴다)
+    expect([c.role, a.role]).toEqual(["customer", "admin"]);
     expect(await findSessionUser(db, c.token)).toMatchObject({ id: customer, role: "customer" });
     expect(await findSessionUser(db, a.token)).toMatchObject({ id: admin, role: "admin" });
     expect(await lifetime(c.token)).toBe(7 * 24 * 60 * 60);
