@@ -12,7 +12,7 @@ TypeScript · Fastify · Drizzle ORM · PostgreSQL 18 · zod · Vitest · React 
 
 ## 로컬 실행
 
-필요: Node.js 22.12 이상, PostgreSQL 18.
+필요: Node.js 22.22 이상(24.x 권장), PostgreSQL 18.
 
 앱은 슈퍼유저가 아니라 전용 role로 접속한다. 슈퍼유저로 psql에 들어가 한 번만 만든다. `CREATEDB`는 테스트가 DB를 복제하는 데 쓴다.
 
@@ -21,14 +21,15 @@ CREATE ROLE seat_booking LOGIN CREATEDB PASSWORD '비밀번호';
 CREATE DATABASE seat_booking OWNER seat_booking;
 ```
 
-`.env.example`을 `.env`로 복사하고 `DATABASE_URL`의 비밀번호를 채운 뒤 실행한다.
+`.env.example`을 `.env`로 복사하고 `DATABASE_URL`의 비밀번호를 채운 뒤 실행한다. 화면을 쓰려면 `.env`에 `APP_ORIGIN=http://localhost:5173`과 `COOKIE_SECURE=false`가 있어야 한다(없으면 화면의 모든 POST가 403이다).
 
 ```sh
 npm ci
 npm run db:migrate -w @seat-booking/api   # 마이그레이션(apps/api/drizzle/)
 npm run db:seed -w @seat-booking/api      # 샘플 공연장·회차로 개발 DB를 다시 채운다(날짜는 지금 판매 중이 되게 옮긴다)
 npm test                                  # 템플릿 DB를 복제한 테스트 DB에서 돌고, 끝나면 지운다
-npm run dev                               # http://127.0.0.1:3001
+npm run dev                               # API: http://127.0.0.1:3001
+npm run dev -w @seat-booking/web          # 화면: http://localhost:5173 (/api를 API로 넘긴다)
 ```
 
 ## API

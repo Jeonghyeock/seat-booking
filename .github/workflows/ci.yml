@@ -49,3 +49,5 @@ jobs:
           echo "DATABASE_URL=postgres://seat_booking:$APP_PASSWORD@localhost:5432/seat_booking" >> "$GITHUB_ENV"
       - run: npm run db:migrate -w @seat-booking/api
       - run: npm test
+      # 화면을 묶을 수 있는지(Vite가 shared의 TS 원본까지 묶는다). typecheck와 단위 테스트는 워크스페이스로 위에서 돈다.
+      - run: npm run build -w @seat-booking/web
