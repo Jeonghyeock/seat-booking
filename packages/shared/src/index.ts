@@ -65,15 +65,40 @@ export const HoldRequest = z.object({
 });
 export type HoldRequest = z.infer<typeof HoldRequest>;
 
+const SeatIds = z.array(z.number().int().positive());
+
+// serverTime은 DB의 now()다. 화면은 PC 시계와의 차이를 보정해 남은 시간과 판매 시작까지를 센다(DESIGN 6.2 "서버 시각").
+// expiresAt은 보통 serverTime + 5분이고, 공연 시작이 그보다 이르면 공연 시작이다.
 export const HoldResponse = z.object({
   holdId: z.number().int().positive(),
   expiresAt: z.iso.datetime({ offset: true }),
-  seatIds: z.array(z.number().int().positive()),
+  serverTime: z.iso.datetime({ offset: true }),
+  seatIds: SeatIds,
 });
 export type HoldResponse = z.infer<typeof HoldResponse>;
 
-// 409의 이유.
-// SEAT_UNAVAILABLE: 담은 좌석 중 하나라도 이미 선점·판매됐거나 이 회차의 좌석이 아니다.
-// HOLD_LIMIT: 이 회차에 이미 쥔 좌석과 합치면 1인 한도를 넘는다.
-export const HoldConflict = z.object({ error: z.string(), code: z.enum(["SEAT_UNAVAILABLE", "HOLD_LIMIT"]) });
+// 409의 이유와, 화면이 다음 행동을 정할 값(DESIGN 6.2 "화면이 받는 것"). code로 가른다.
+// SALES_CLOSED: 판매 기간이 아니다. NOT_OPEN이면 serverTime으로 시계를 맞춰 salesOpenAt까지 센다.
+// HOLD_LIMIT: 이 회차에 쥔 좌석·산 좌석과 합치면 1인 한도를 넘는다.
+// PRICE_MISSING: 담은 좌석 중 이 회차에 가격이 없는 좌석(seatIds)이 있다. 그 좌석을 빼고 다시 고른다.
+// SEAT_UNAVAILABLE: 담은 좌석 중 이미 선점·판매됐거나 이 회차의 좌석이 아닌 것(seatIds)이 있다.
+export const HoldConflict = z.discriminatedUnion("code", [
+  z.object({
+    error: z.string(),
+    code: z.literal("SALES_CLOSED"),
+    reason: z.enum(["NOT_OPEN", "CLOSED"]),
+    salesOpenAt: z.iso.datetime({ offset: true }),
+    startsAt: z.iso.datetime({ offset: true }),
+    serverTime: z.iso.datetime({ offset: true }),
+  }),
+  z.object({
+    error: z.string(),
+    code: z.literal("HOLD_LIMIT"),
+    limit: z.number().int().positive(),
+    heldSeats: z.number().int().nonnegative(),
+    purchasedSeats: z.number().int().nonnegative(),
+  }),
+  z.object({ error: z.string(), code: z.literal("PRICE_MISSING"), seatIds: SeatIds }),
+  z.object({ error: z.string(), code: z.literal("SEAT_UNAVAILABLE"), seatIds: SeatIds }),
+]);
 export type HoldConflict = z.infer<typeof HoldConflict>;

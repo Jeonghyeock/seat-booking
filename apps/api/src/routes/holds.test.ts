@@ -20,6 +20,11 @@ describe("POST /performances/:id/holds", () => {
       payload: { seatIds },
     });
 
+  const conflict = (res: Awaited<ReturnType<typeof hold>>) => {
+    expect(res.statusCode).toBe(409);
+    return HoldConflict.parse(res.json());
+  };
+
   async function statuses(performanceId: number) {
     const res = await app.inject({ method: "GET", url: `/performances/${performanceId}/seats` });
     return new Map(SeatMap.parse(res.json()).seats.map((s) => [s.seatId, s.status]));
@@ -36,6 +41,8 @@ describe("POST /performances/:id/holds", () => {
     const minutesLeft = (Date.parse(body.expiresAt) - Date.now()) / 60_000;
     expect(minutesLeft).toBeGreaterThan(4);
     expect(minutesLeft).toBeLessThanOrEqual(5);
+    // 만료 시각은 서버 시각(트랜잭션을 시작한 DB 시각)에서 정확히 5분 뒤다
+    expect(Date.parse(body.expiresAt) - Date.parse(body.serverTime)).toBe(5 * 60_000);
 
     const map = await statuses(performanceId);
     expect([map.get(seatIds[0]!), map.get(seatIds[1]!), map.get(seatIds[2]!)]).toEqual(["held", "held", "available"]);
@@ -55,9 +62,11 @@ describe("POST /performances/:id/holds", () => {
     const [first, second] = await newUsers(pool, 2);
     expect((await hold(performanceId, first, [seatIds[1]])).statusCode).toBe(201);
 
-    const res = await hold(performanceId, second, [seatIds[0], seatIds[1]]);
-    expect(res.statusCode).toBe(409);
-    expect(HoldConflict.parse(res.json()).code).toBe("SEAT_UNAVAILABLE");
+    // 안 되는 좌석만 돌려준다
+    expect(conflict(await hold(performanceId, second, [seatIds[0], seatIds[1]]))).toMatchObject({
+      code: "SEAT_UNAVAILABLE",
+      seatIds: [seatIds[1]],
+    });
     expect((await statuses(performanceId)).get(seatIds[0]!)).toBe("available");
     const { rows } = await pool.query("select count(*) as n from holds where user_id = $1", [second]);
     expect(rows[0].n).toBe(0);
@@ -84,12 +93,89 @@ describe("POST /performances/:id/holds", () => {
     expect(rows[0].hold_id).toBe(HoldResponse.parse(res.json()).holdId);
   });
 
-  it("이 회차에 없는 좌석을 담으면 409", async () => {
+  it("이 회차에 없는 좌석을 담으면 409 SEAT_UNAVAILABLE", async () => {
     const { performanceId } = await newPerformance(pool);
     const other = await newPerformance(pool);
     const [userId] = await newUsers(pool, 1);
-    const res = await hold(performanceId, userId, [other.seatIds[0]]);
-    expect(res.statusCode).toBe(409);
+    expect(conflict(await hold(performanceId, userId, [other.seatIds[0]]))).toMatchObject({
+      code: "SEAT_UNAVAILABLE",
+      seatIds: [other.seatIds[0]],
+    });
+  });
+
+  it("판매가 열리기 전이나 공연이 시작한 뒤에는 409 SALES_CLOSED이고, 판단에 쓴 시각을 함께 준다", async () => {
+    const { performanceId, seatIds } = await newPerformance(pool);
+    const [userId] = await newUsers(pool, 1);
+
+    const opening = await pool.query(
+      "update performances set sales_open_at = now() + interval '1 hour' where id = $1 returning sales_open_at, starts_at",
+      [performanceId],
+    );
+    const notOpen = conflict(await hold(performanceId, userId, [seatIds[0]]));
+    if (notOpen.code !== "SALES_CLOSED") throw new Error(notOpen.code);
+    expect(notOpen).toMatchObject({
+      reason: "NOT_OPEN",
+      salesOpenAt: opening.rows[0].sales_open_at.toISOString(),
+      startsAt: opening.rows[0].starts_at.toISOString(),
+    });
+    expect(Date.parse(notOpen.serverTime)).toBeLessThan(Date.parse(notOpen.salesOpenAt));
+
+    // 판매 시작은 공연 시작보다 앞서야 한다(CHECK)
+    await pool.query(
+      "update performances set sales_open_at = now() - interval '2 hours', starts_at = now() - interval '1 hour' where id = $1",
+      [performanceId],
+    );
+    const closed = conflict(await hold(performanceId, userId, [seatIds[0]]));
+    if (closed.code !== "SALES_CLOSED") throw new Error(closed.code);
+    expect(closed.reason).toBe("CLOSED");
+    expect(Date.parse(closed.serverTime)).toBeGreaterThanOrEqual(Date.parse(closed.startsAt));
+
+    const { rows } = await pool.query("select count(*) as n from holds where user_id = $1", [userId]);
+    expect(rows[0].n).toBe(0);
+    expect((await statuses(performanceId)).get(seatIds[0]!)).toBe("available");
+  });
+
+  it("공연 시작이 5분 안이면 선점은 공연 시작에 끝난다", async () => {
+    const { performanceId, seatIds } = await newPerformance(pool);
+    const [userId] = await newUsers(pool, 1);
+    await pool.query("update performances set starts_at = now() + interval '2 minutes' where id = $1", [performanceId]);
+
+    const res = await hold(performanceId, userId, [seatIds[0], seatIds[1]]);
+    expect(res.statusCode).toBe(201);
+    const { holdId } = HoldResponse.parse(res.json());
+    // 밀리초로 바꾸지 않고 DB에서 그대로 비교한다
+    const { rows } = await pool.query(
+      `select h.expires_at = p.starts_at as capped, bool_and(ps.hold_expires_at = h.expires_at) as same_expiry
+         from holds h
+         join performances p on p.id = h.performance_id
+         join performance_seats ps on ps.hold_id = h.id
+        where h.id = $1
+        group by h.expires_at, p.starts_at`,
+      [holdId],
+    );
+    expect(rows).toEqual([{ capped: true, same_expiry: true }]);
+  });
+
+  it("담은 좌석 중 이 회차에 등급 가격이 없는 좌석이 있으면 409 PRICE_MISSING이고, 어느 좌석도 잡지 않는다", async () => {
+    const { performanceId, seatIds } = await newPerformance(pool);
+    const [userId] = await newUsers(pool, 1);
+    const { rows: grades } = await pool.query<{ seat_id: number; grade: string }>(
+      "select id as seat_id, grade from seats where id = any($1::bigint[]) order by id",
+      [seatIds],
+    );
+    const missing = grades[0]!.grade;
+    const unpriced = grades.filter((s) => s.grade === missing).map((s) => s.seat_id);
+    const priced = grades.find((s) => s.grade !== missing)!.seat_id;
+    await pool.query("delete from performance_grades where performance_id = $1 and grade = $2", [performanceId, missing]);
+
+    expect(conflict(await hold(performanceId, userId, [unpriced[1], priced, unpriced[0]]))).toMatchObject({
+      code: "PRICE_MISSING",
+      seatIds: [unpriced[0], unpriced[1]],
+    });
+    const map = await statuses(performanceId);
+    expect([map.get(unpriced[0]!), map.get(priced)]).toEqual(["available", "available"]);
+    const { rows } = await pool.query("select count(*) as n from holds where user_id = $1", [userId]);
+    expect(rows[0].n).toBe(0);
   });
 
   it("헤더가 없거나 형식이 틀리면 400, 없는 사용자는 401, 없는 회차는 404", async () => {
