@@ -18,10 +18,11 @@ function conflictBody(failure: HoldFailure): HoldConflict {
   switch (failure.code) {
     case "SALES_CLOSED":
       return {
-        error: failure.reason === "NOT_OPEN" ? "아직 판매가 열리지 않았습니다" : "판매가 끝났습니다",
+        error: failure.reason === "NOT_OPEN" ? "아직 판매가 열리지 않았습니다" : "예매가 마감되었습니다",
         code: failure.code,
         reason: failure.reason,
         salesOpenAt: failure.salesOpenAt.toISOString(),
+        salesCloseAt: failure.salesCloseAt.toISOString(),
         startsAt: failure.startsAt.toISOString(),
         serverTime: failure.serverTime.toISOString(),
       };

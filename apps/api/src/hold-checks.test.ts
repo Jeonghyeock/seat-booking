@@ -20,7 +20,7 @@ describe("선점 확인", () => {
       }),
     );
 
-  it("판매 기간의 경계: now()가 판매 시작과 같으면 열려 있고, 공연 시작과 같으면 닫혀 있다", async () => {
+  it("판매 기간의 경계: now()가 판매 시작과 같으면 열려 있고, 판매 종료와 같으면 닫혀 있다", async () => {
     const { performanceId, seatIds } = await newPerformance(pool);
     const [userId] = await newUsers(pool, 1);
 
@@ -30,11 +30,11 @@ describe("선점 확인", () => {
     );
     expect(atOpen.ok).toBe(true);
 
-    const atStart = await holdAfter(
+    const atClose = await holdAfter(
       { userId: userId!, performanceId, seatIds: [seatIds[1]!] },
-      sql`update performances set sales_open_at = now() - interval '1 hour', starts_at = now() where id = ${performanceId}`,
+      sql`update performances set sales_open_at = now() - interval '1 hour', sales_close_at = now() where id = ${performanceId}`,
     );
-    expect(atStart).toMatchObject({ ok: false, code: "SALES_CLOSED", reason: "CLOSED" });
+    expect(atClose).toMatchObject({ ok: false, code: "SALES_CLOSED", reason: "CLOSED" });
   });
 
   it("판매 기간·한도·가격으로 거절되는 요청은 좌석 잠금을 기다리지 않는다", async () => {

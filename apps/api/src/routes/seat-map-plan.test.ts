@@ -22,8 +22,9 @@ describe("좌석 지도 조회의 실행 계획", () => {
     const { venueId, performanceIds } = await seed(db, readSeedFile(SAMPLE_SEED));
     await pool.query(
       `with more as (
-         insert into performances (show_id, venue_id, starts_at, sales_open_at)
-         select p.show_id, p.venue_id, p.starts_at + make_interval(days => g), p.sales_open_at
+         insert into performances (show_id, venue_id, starts_at, sales_open_at, sales_close_at)
+         select p.show_id, p.venue_id, p.starts_at + make_interval(days => g), p.sales_open_at,
+                p.sales_close_at + make_interval(days => g)
            from performances p, generate_series(1, 300) g
           where p.id = $2
          returning id

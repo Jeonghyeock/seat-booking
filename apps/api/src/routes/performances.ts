@@ -12,6 +12,9 @@ function performanceSummaries(db: Db) {
       venueName: venues.name,
       startsAt: performances.startsAt,
       salesOpenAt: performances.salesOpenAt,
+      salesCloseAt: performances.salesCloseAt,
+      // 좌석 지도가 함께 주는 서버 시각. sql 조각은 timestamptz를 문자열로 돌려주므로 timestamptz 열의 변환으로 Date를 받는다.
+      serverTime: sql`now()`.mapWith(performances.startsAt),
     })
     .from(performances)
     .innerJoin(shows, eq(shows.id, performances.showId))
@@ -45,10 +48,11 @@ export function seatMapQuery(db: Db, performanceId: number) {
 }
 
 type SummaryRow = Awaited<ReturnType<typeof performanceSummaries>>[number];
-const toSummary = (p: SummaryRow) => ({
+const toSummary = ({ serverTime: _, ...p }: SummaryRow) => ({
   ...p,
   startsAt: p.startsAt.toISOString(),
   salesOpenAt: p.salesOpenAt.toISOString(),
+  salesCloseAt: p.salesCloseAt.toISOString(),
 });
 
 export const performanceRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db }) => {
@@ -65,7 +69,7 @@ export const performanceRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, 
       const [performance] = await performanceSummaries(db).where(eq(performances.id, id));
       if (!performance) return reply.code(404).send({ error: "회차를 찾을 수 없습니다" });
       const seatRows = await seatMapQuery(db, id);
-      return { performance: toSummary(performance), seats: seatRows };
+      return { performance: toSummary(performance), seats: seatRows, serverTime: performance.serverTime.toISOString() };
     },
   );
 };

@@ -74,7 +74,7 @@
 | `sessions` | id(무작위 32바이트), user_id, expires_at | 4단계 |
 | `venues`, `seats` | 구역·열·번호, 등급 | 시드 JSON |
 | `shows` | title | 공연 작품. 1단계에서 더함(회차에 제목을 두면 회차마다 되풀이된다) |
-| `performances` | show_id, venue_id, starts_at, sales_open_at | 회차 |
+| `performances` | show_id, venue_id, starts_at, sales_open_at, sales_close_at | 회차. 판매 기간은 `sales_open_at <= now() < sales_close_at`이고 `sales_close_at <= starts_at`(CHECK). 판매 종료는 회차마다 정한다(10장 54) |
 | `performance_grades` | (performance_id, grade) PK, price | 회차별 등급 가격. 1단계에서 더함(가격은 좌석이 아니라 등급마다 정해진다) |
 | `performance_seats` | (performance_id, seat_id) PK, status, hold_id, hold_expires_at | 좌석 재고. status: available / held / sold. 빈 좌석에만 hold_id가 없다(팔린 좌석은 어느 선점에서 팔렸는지 남긴다). 만료 시각은 holds와 이 표에 함께 둔다(6.1) |
 | `holds` | user_id, performance_id, expires_at | 선점 묶음. 요청 하나로 잡은 좌석들이 같은 hold를 가리킨다 |
@@ -115,7 +115,7 @@
 
   advisory lock은 좌석 잠금보다 먼저 잡는다(위의 잠금 순서). 세는 것은 좌석 재고 행 중 이 사용자의 선점에 묶인 `held`이고 아직 만료되지 않은 것이다. 3단계부터는 팔린 좌석(`sold`)도 센다(10장 18). 팔린 좌석은 선점(`hold_id`)을 남기므로(10장 16) 같은 질의로 센다. 조건은 `(status = 'held' AND hold_expires_at >= now()) OR status = 'sold'`다. 팔린 좌석도 만료 시각을 그대로 남기므로, `status in ('held', 'sold') AND hold_expires_at >= now()`로 쓰면 팔린 좌석이 5분 뒤 한도에서 빠진다. 만료된 선점을 sold로 바꾸는 결제 확정도 이 한도를 늘리므로 같은 advisory lock을 잡는다(6.2).
 
-- **판매 기간.** 선점 트랜잭션 안에서 회차의 `sales_open_at <= now() < starts_at`을 확인하고, 아니면 409 `SALES_CLOSED`다(10장 19). 판매가 열리는 순간에도 앱 서버들의 시계가 아니라 DB 시계 하나로 판단한다. 선점의 만료 시각은 `least(now() + 5분, starts_at)`이다. 공연 직전에 잡은 선점이 공연이 시작한 뒤에 확정되지 않게 한다. 결제 마감(만료 30초 전, 6.2)이 있어서 공연 시작 30초 안에 잡은 선점은 결제할 수 없다(10장 36).
+- **판매 기간.** 선점 트랜잭션 안에서 회차의 `sales_open_at <= now() < sales_close_at`을 확인하고, 아니면 409 `SALES_CLOSED`다(10장 19). 판매가 열리고 닫히는 순간에도 앱 서버들의 시계가 아니라 DB 시계 하나로 판단한다. 판매 종료(`sales_close_at`)는 회차마다 운영자가 정하는 시각이다(공연 전일 17시, 공연 3시간 전 등, 10장 54). 판매 종료는 **새 선점만** 막는다. 그 전에 잡은 선점은 5분을 다 받아 만료까지 주문·결제할 수 있다. 그래서 판매 현황은 판매 종료 뒤 최대 5분 동안 바뀔 수 있다. 선점의 만료 시각은 `least(now() + 5분, starts_at)`이다. 공연 직전에 잡은 선점이 공연이 시작한 뒤에 확정되지 않게 한다. 판매 종료가 공연 시작과 같은 회차에서만, 공연 시작 30초 안에 잡은 선점은 결제 마감(만료 30초 전, 6.2)이 이미 지나 결제할 수 없다.
 - **확인 순서.** 선점 트랜잭션은 advisory lock을 잡은 뒤 판매 기간 → 1인 한도 → 가격(`PRICE_MISSING`, 6.2) → 좌석 순서로 본다. 앞의 셋은 좌석을 잠그기 전에 끝나서, 거절될 요청이 좌석 잠금을 잡지 않는다. 가격 확인은 이 회차에 있는 좌석만 보고, 없는 좌석은 마지막에 `SEAT_UNAVAILABLE`이 된다.
 
 ### 6.2 주문, 가짜 결제, 멱등성 (3단계)
@@ -188,7 +188,7 @@
   |---|---|---|
   | `SEAT_UNAVAILABLE` | `seatIds`(안 되는 좌석) | 그 좌석을 빼고 다시 고르게 |
   | `HOLD_LIMIT` | `limit`, `heldSeats`, `purchasedSeats` | "회차당 1인 4석(구매 포함). 지금 선점 n석, 구매 m석" |
-  | `SALES_CLOSED` | `reason`(`NOT_OPEN`·`CLOSED`), `salesOpenAt`, `startsAt`, `serverTime` | 열기 전이면 카운트다운 |
+  | `SALES_CLOSED` | `reason`(`NOT_OPEN`·`CLOSED`), `salesOpenAt`, `salesCloseAt`, `startsAt`, `serverTime` | 열기 전이면 카운트다운, 닫혔으면 "예매가 마감되었습니다" |
   | `PRICE_MISSING` | `seatIds` | 그 좌석을 빼고 다시 |
   | `HOLD_EXPIRED` | `expiredAt` | 좌석 다시 고르기 |
   | `ORDER_EXISTS` | `orderId` | 그 주문으로 간다 |
@@ -214,7 +214,7 @@
 | cancelled | requested | "결제 결과 확인 중. 결제됐다면 자동 환불됩니다" |
 | cancelled | refund_pending·refunded·refund_failed | 환불 진행 중 / 환불 완료(금액·시각) / 환불 지연, 문의 |
 
-5단계 화면에서 지킬 것(지금 정해 둠): 좌석은 모아 한 번에 선점한다(묶음마다 주문·결제가 따로 생긴다). 본문 없는 결제 요청·취소에는 `Content-Type`을 붙이지 않는다(빈 본문에 `application/json`이면 400). 화면이 다른 origin에서 돌면 `Retry-After`·`Idempotent-Replayed`를 읽도록 `Access-Control-Expose-Headers`에 넣는다. "내 예매"에는 paid뿐 아니라 결제가 붙은 cancelled 주문(환불 중·완료)도 넣는다. 관리자 판매 현황에 refund_failed 목록을 둔다.
+5단계 화면에서 지킬 것(지금 정해 둠): 좌석은 모아 한 번에 선점한다(묶음마다 주문·결제가 따로 생긴다). 판매 종료 뒤에는 주문을 취소하면("좌석 다시 선택") 다시 선점할 수 없으므로, 그 버튼을 숨기거나 확인받는다. 회차 상세와 좌석 지도에는 "예매 마감 MM/DD HH:mm"를 보여 준다(좌석 지도의 `serverTime`으로 시계를 맞춘다). 본문 없는 결제 요청·취소에는 `Content-Type`을 붙이지 않는다(빈 본문에 `application/json`이면 400). 화면이 다른 origin에서 돌면 `Retry-After`·`Idempotent-Replayed`를 읽도록 `Access-Control-Expose-Headers`에 넣는다. "내 예매"에는 paid뿐 아니라 결제가 붙은 cancelled 주문(환불 중·완료)도 넣는다. 관리자 판매 현황에 refund_failed 목록을 둔다.
 
 **주문 생성.** 한 트랜잭션에서 선점이 이 사용자의 것이고 만료 전인지, 그 선점의 좌석이 모두 `held`로 남았는지 보고(좌석을 읽는 문장 안에서 `clock_timestamp()`로 만료를 본다. 문장이 기다린 사이 만료되어 다른 선점이 가져간 좌석만 빠진 주문이 생기지 않게), 좌석마다 그때의 등급 가격을 `order_items`에 복사한다. `orders.amount`는 그 합이다. 나중에 `performance_grades`의 가격이 바뀌어도 이미 낸 금액은 그대로다. 선점 하나에 주문 하나(`orders.hold_id` unique)라 다른 키로 두 번 와도 두 번째는 `ORDER_EXISTS`다.
 
@@ -421,7 +421,7 @@ seat-booking/
 
 구현 리뷰에서 더한 것(2026-10-23):
 
-36. 판매 종료는 지금 공연 시작(`starts_at`)이다. 결제 마감이 선점 만료 30초 전이라, 공연 시작 30초 안에 잡은 선점은 결제할 수 없다. 판매 종료를 공연 시작보다 앞당기는 여유(`starts_at − n`)는 운영 규칙이 필요할 때 정한다. (AI 판단, 선점 PR 리뷰 L2)
+36. 판매 종료는 지금 공연 시작(`starts_at`)이다. 결제 마감이 선점 만료 30초 전이라, 공연 시작 30초 안에 잡은 선점은 결제할 수 없다. 판매 종료를 공연 시작보다 앞당기는 여유(`starts_at − n`)는 운영 규칙이 필요할 때 정한다. (AI 판단, 선점 PR 리뷰 L2) → 54에서 바꿈.
 37. 멱등 키로 다시 보낸 요청에는 처음 응답을 그대로 주고 `Idempotent-Replayed: true`를 붙인다. C4("응답은 처음과 같다")를 지키려고 본문의 serverTime·status를 고치지 않는다. 화면은 이 헤더를 보면 `GET /orders/:id`로 최신 상태를 읽는다. (AI 판단, 주문 PR)
 38. 없는 사용자(401)와 없거나 남의 선점(404)은 멱등 키를 잡기 전에 거른다. 키 행이 사용자를 외래 키로 가리키고, 이 확인은 아무것도 바꾸지 않는다. 남의 선점·주문은 없는 것과 같이 404다. (AI 판단, 주문 PR)
 39. request_hash에는 검증을 마친 값을 넣는다. 주문 생성은 본문이 없어 선점 id만 넣는다. 본문 `{}`를 보냈는지에 따라 422가 나지 않게 한다. (AI 판단, 주문 PR)
@@ -439,3 +439,7 @@ seat-booking/
 51. 환불·대사는 결제사에 닿지 않으면(장애, 3초 초과) 그 결제를 건너뛰고 다음 번에 다시 한다. 환불 시도 횟수는 결제사가 "모른다"고 답했을 때만 늘린다. 장애가 길어도 refund_failed로 가지 않는다. 대사의 결과 반영은 웹훅과 같은 함수(applyPaymentResult)이고, 무효로 해 둔 결제는 주문 → 결제 순서로 잡고 requested일 때만 failed로 바꾼다. (AI 판단, 정리 PR)
 52. 환불·대사는 결제사에 잇달아 세 번 닿지 않으면 그 바퀴에서 그 단계를 멈추고 경보 한 줄을 남긴다. 장애 중에 결제마다 3초를 기다리고 로그를 남기면 한 바퀴가 수십 분이 되고 로그가 쏟아진다. 첫 실패에 멈추지 않는 것은, 늘 실패하는 결제 하나가 맨 앞에 있을 때 뒤의 결제가 끝내 처리되지 않기 때문이다. DB만 쓰는 단계(좌석 풀기, 주문 취소, 멱등 키 지우기)를 먼저 돈다. 정리 루프를 멈출 때는 진행 중인 바퀴가 끝날 때까지 기다린 뒤 풀을 닫는다. (AI 판단, 정리 PR 리뷰 M1·L1)
 53. 선점이 이미 만료된 pending 주문을 사용자가 취소하면 이유는 expired다. 주문 조회가 이미 cancelled(expired)로 보여 준 것과 같게 하고, 정리 작업이 했을 결과와도 같다. 결제 확인 중(requested)인 주문도 취소할 수 있고, 그 결제가 뒤에 성공하면 확정이 환불로 보낸다. 화면은 취소 전에 "결제됐다면 자동 환불"을 알린다(6.2 주문과 결제의 조합 표). (AI 판단, 취소 PR)
+
+3단계 검토에서 정한 것(2026-10-23):
+
+54. 판매 종료는 회차마다 정하는 시각(`performances.sales_close_at`, NOT NULL)이다. 실제 예매처는 예매 마감을 공연(회차)마다 기획사가 정한다(공연 전일 17시, 관람 3·4시간 전 등). "전일 17시"가 사이트 공통 규칙인 것은 취소 마감 쪽이다. 시계 시각 규칙("전일 17시")이 있어 간격이 아니라 시각으로 둔다. 판매 종료는 새 선점만 막고, 그 전에 잡은 선점은 5분을 다 받아 만료까지 주문·결제할 수 있다(선점 만료는 지금처럼 공연 시작에서만 자른다). 판매 종료에서 자르면 "판매 종료 30초 안의 선점은 결제 불가"가 모든 회차로 옮겨 오고, 마감 직전이 결제 실패·환불이 몰리는 새 경계가 된다. 샘플 시드는 뮤지컬을 공연 전일 17시, 음악회를 공연 3시간 전에 닫는다. 이미 있는 회차는 마이그레이션이 공연 3시간 전으로 채운다(판매 시작이 그보다 늦으면 공연 시작). 4단계 관리자 화면의 기본값은 공연 3시간 전을 권한다. 취소 마감은 결제 후 취소가 생길 때 따로 둔다. 좌석 지도에 `serverTime`을 더해 화면이 판매 시작·종료까지 센다. (사용자 결정: 판매 종료를 공연 시작보다 앞당김. 나머지는 AI 판단, 조사·설계 비교 에이전트 셋)

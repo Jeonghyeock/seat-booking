@@ -508,6 +508,24 @@ describe("결제 요청, 웹훅, 결제 확정", () => {
     expect(await state(order.orderId)).toMatchObject({ status: "paid", payments: ["succeeded"], tickets: 2 });
   });
 
+  it("판매 종료 전에 잡은 선점은 판매 종료 뒤에도 결제해 확정할 수 있고, 새 선점은 SALES_CLOSED다", async () => {
+    const { userId, order, performanceId, seatIds } = await newOrder(2);
+    await admin.query("update performances set sales_close_at = now() - interval '1 second' where id = $1", [performanceId]);
+    accepted(await pay(order.orderId, userId));
+    expect(await provider.flush()).toEqual([200]);
+    expect(await state(order.orderId)).toMatchObject({ status: "paid", seats: ["sold", "sold"], tickets: 2 });
+
+    const [other] = await newUsers(admin, 1);
+    const res = await app.inject({
+      method: "POST",
+      url: `/performances/${performanceId}/holds`,
+      headers: { "x-user-id": String(other) },
+      payload: { seatIds: [seatIds[5]] },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: "SALES_CLOSED", reason: "CLOSED" });
+  });
+
   it("없는 사용자 401, 남의 주문 404이고, 키 행이 남지 않는다", async () => {
     const { order } = await newOrder(1);
     const [stranger] = await newUsers(admin, 1);
