@@ -86,12 +86,25 @@ export const performanceGrades = pgTable(
   ],
 );
 
-// 선점하는 사람. 2단계에서는 선점을 누가 했는지만 가리키면 되므로 최소한만 둔다. 비밀번호·세션·역할은 4단계에서 더한다.
-export const users = pgTable("users", {
-  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  email: text("email").notNull().unique(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+// 선점하는 사람. 2단계에서 id·email만으로 만들고, 4단계에서 비밀번호·역할을 더했다.
+export const USER_ROLES = ["customer", "admin"] as const;
+
+export const users = pgTable(
+  "users",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    email: text("email").notNull().unique(),
+    // argon2id PHC 문자열(DESIGN 6.3). 4단계 전에 만든 사용자는 비어 있어 로그인할 수 없다.
+    passwordHash: text("password_hash"),
+    role: text("role", { enum: USER_ROLES }).notNull().default("customer"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("users_role_valid", sql`${t.role} in ('customer', 'admin')`),
+    // 이메일은 앞뒤 공백을 지우고 소문자로 저장한다. 대소문자만 다른 두 계정이 생기지 않게 DB가 지킨다.
+    check("users_email_normalized", sql`${t.email} = lower(btrim(${t.email}))`),
+  ],
+);
 
 // 선점 묶음. 요청 하나로 잡은 좌석들이 같은 hold를 가리킨다.
 export const holds = pgTable(
@@ -333,5 +346,28 @@ export const idempotencyKeys = pgTable(
     check("idempotency_keys_response_fields_together", sql`(${t.responseCode} is null) = (${t.responseBody} is null)`),
     // 24시간 지난 키를 지운다(DESIGN 6.2 정리 5).
     index("idempotency_keys_created_idx").on(t.createdAt),
+  ],
+);
+
+// ── 4단계: 세션(DESIGN 6.3) ──
+
+// 로그인 세션. 쿠키의 토큰이 아니라 그 SHA-256(16진수 64자)만 둔다. DB가 새도 그 값으로 쿠키를 만들 수 없다.
+// 만료는 만들 때 역할로 정하고 늘리지 않는다(손님 7일, 관리자 12시간).
+export const sessions = pgTable(
+  "sessions",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    userId: bigint("user_id", { mode: "number" })
+      .notNull()
+      .references(() => users.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    check("sessions_token_hash_length", sql`char_length(${t.tokenHash}) = 64`),
+    // 사용자당 최근 세션만 남기고, 역할을 바꾸면 그 사용자의 세션을 모두 지운다.
+    index("sessions_user_created_idx").on(t.userId, t.createdAt),
+    // 정리 작업 6이 만료된 세션을 찾는다.
+    index("sessions_expires_idx").on(t.expiresAt),
   ],
 );
