@@ -10,8 +10,8 @@ if (!databaseUrl) throw new Error("DATABASE_URL이 없습니다(.env 또는 환�
 const port = Number(process.env.PORT ?? 3001);
 const host = process.env.HOST ?? "127.0.0.1";
 
-// 가짜 결제사의 웹훅 서명 비밀. 서명과 확인이 이 프로세스 안에서만 일어나므로, 없으면 띄울 때마다 무작위로 만든다.
-const paymentProvider = new FakePaymentProvider(process.env.FAKE_PAY_SECRET ?? randomBytes(32).toString("hex"));
+// 가짜 결제사의 웹훅 서명 비밀. 서명과 확인이 이 프로세스 안에서만 일어나므로, 없거나 비어 있으면 띄울 때마다 무작위로 만든다.
+const paymentProvider = new FakePaymentProvider(process.env.FAKE_PAY_SECRET || randomBytes(32).toString("hex"));
 
 const pool = createPool({ connectionString: databaseUrl });
 const app = buildApp(pool, { logger: true }, { paymentProvider });

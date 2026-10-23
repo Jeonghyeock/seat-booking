@@ -210,7 +210,7 @@ export const PaymentRequest = z
 export type PaymentRequest = z.infer<typeof PaymentRequest>;
 
 // 결제 요청 202. 결과는 웹훅으로 오므로 status는 보통 requested다. 웹훅이 먼저 왔으면 succeeded일 수 있고,
-// 결제사가 무효로 거절했으면(대사가 이미 failed로 바꿈) failed다. 화면은 주문 조회로 결과를 기다린다.
+// 결제사가 무효로 거절했으면 대사가 failed로 바꾼 뒤면 failed, 그 전이면 requested다. 화면은 주문 조회로 결과를 기다린다.
 export const PaymentAccepted = z.object({
   orderId: z.number().int().positive(),
   paymentId: z.number().int().positive(),

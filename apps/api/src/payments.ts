@@ -1,5 +1,6 @@
-import type { PaymentAccepted, PaymentScenario } from "@seat-booking/shared";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import type { PaymentAccepted, PaymentScenario, PaymentStatus } from "@seat-booking/shared";
+import { and, eq, isNull, ne, sql } from "drizzle-orm";
+import type { FastifyBaseLogger } from "fastify";
 import { type Db, type Tx, writeTransaction } from "./db/client.js";
 import { holds, orders, payments, paymentWebhooks, tickets } from "./db/schema.js";
 import type { CreateResult, FakePaymentProvider } from "./fake-pay.js";
@@ -16,16 +17,18 @@ export type RequestPaymentResult =
   | { ok: false; code: "PAYMENT_IN_PROGRESS"; paymentId: number }
   | { ok: false; code: "PAYMENT_PROVIDER_UNAVAILABLE"; paymentId: number; cause: unknown };
 
-type PaymentStatus = PaymentAccepted["status"];
-type Logger = { warn: (obj: object, msg: string) => void };
+type Logger = Pick<FastifyBaseLogger, "warn">;
 
 // 결제 요청(DESIGN 6.2 결제 요청). 부르는 쪽이 주문이 이 사용자의 것인지 먼저 확인한다.
 // 1. 트랜잭션 A: 주문 행을 잡고, 이 주문에서 같은 멱등 키로 만든 결제를 상태와 상관없이 먼저 찾는다. 있으면 새로 만들지 않는다.
-//    requested면 그 결제로 2부터 다시 하고, 다른 상태면 그 결제로 202다. 다시 보낸 요청, 넘겨받은 요청, 503 뒤 같은 키에 모두 같다.
-//    없을 때만 결제할 수 있는 주문인지 보고, 다른 키의 진행 중인 결제가 있으면 PAYMENT_IN_PROGRESS다.
+//    끝난 결제(requested가 아님)면 그 결제로 202다. requested면 결제할 수 있는 주문일 때만 그 결제로 2부터 다시 한다.
+//    결제 마감이 지났거나 주문이 끝났으면 결제사를 부르지 않고 ORDER_NOT_PAYABLE이다. 그 결제 행은 대사가 맞춘다(리뷰 M1).
+//    다시 보낸 요청, 넘겨받은 요청, 503 뒤 같은 키에 모두 같다.
+//    같은 키의 결제가 없으면 결제할 수 있는 주문인지 보고, 다른 키의 진행 중인 결제가 있으면 PAYMENT_IN_PROGRESS다.
 //    결제 행(requested)을 넣고 커밋한다. 결제 id가 결제사 쪽 멱등 키다. 웹훅이 응답보다 먼저 와도 이 행이 있다.
 // 2. 트랜잭션 밖에서 결제사를 부른다(3초 제한). 실패하면 PAYMENT_PROVIDER_UNAVAILABLE. 결제 행은 남고, 같은 키로 다시 보내거나
-//    대사 작업이 같은 결제 id로 다시 묻는다. 결제사가 무효로 거절하면(VOIDED, 대사가 이미 failed로 바꿈) 결제 행은 그대로다.
+//    대사 작업이 같은 결제 id로 다시 묻는다. 결제사가 무효로 거절하면(VOIDED, 대사가 무효로 해 둠) 결제 행은 그대로다.
+//    대사가 아직 failed로 바꾸기 전이면 202의 status는 requested다.
 // 3. 트랜잭션 B: provider_ref를 채우고(웹훅이 먼저 채웠으면 그대로 둔다) 결제의 지금 상태로 202다.
 // beforeCommit은 202를 돌려주는 트랜잭션에서 응답을 저장한다(멱등 키).
 export async function requestPayment(
@@ -49,8 +52,7 @@ export async function requestPayment(
       .select({ id: payments.id, status: payments.status })
       .from(payments)
       .where(and(eq(payments.orderId, orderId), eq(payments.idempotencyKey, key)));
-    if (same?.status === "requested") return { call: same.id };
-    if (same) return accept(tx, same.id, same.status);
+    if (same && same.status !== "requested") return accept(tx, same.id, same.status);
 
     const [order] = await tx
       .select({
@@ -64,6 +66,7 @@ export async function requestPayment(
       .where(eq(orders.id, orderId));
     const reason = notPayableReason(order!);
     if (reason) return { ok: false, code: "ORDER_NOT_PAYABLE", orderId, reason };
+    if (same) return { call: same.id };
 
     // 진행 중인 결제는 주문마다 하나다(부분 unique 인덱스가 마지막 방어). 주문 행을 쥐고 있어 그사이 생기지 않는다.
     const [inProgress] = await tx
@@ -143,9 +146,22 @@ export function handleWebhook(db: Db, event: PaymentEvent, body: object, log: Lo
 }
 
 async function applyEvent(tx: Tx, event: PaymentEvent, log: Logger): Promise<Exclude<WebhookResult, "duplicate">> {
-  const [payment] = await tx.select({ orderId: payments.orderId }).from(payments).where(eq(payments.id, event.paymentId));
+  const [payment] = await tx
+    .select({ orderId: payments.orderId, providerRef: payments.providerRef })
+    .from(payments)
+    .where(eq(payments.id, event.paymentId));
   if (!payment) {
     log.warn({ event }, "웹훅: 모르는 결제");
+    return "unmatched";
+  }
+  // 결제사 번호가 이 결제의 것과 다르거나 다른 결제의 것이면 맞지 않는 웹훅이다. 채우면 provider_ref unique에 걸려
+  // 처리가 계속 실패하고 웹훅이 끝없이 다시 온다(리뷰 L3).
+  const [owner] = await tx
+    .select({ id: payments.id })
+    .from(payments)
+    .where(and(eq(payments.providerRef, event.providerRef), ne(payments.id, event.paymentId)));
+  if ((payment.providerRef !== null && payment.providerRef !== event.providerRef) || owner) {
+    log.warn({ event, providerRef: payment.providerRef }, "웹훅: 결제사 번호가 맞지 않음");
     return "unmatched";
   }
   if (event.type !== "payment.succeeded" && event.type !== "payment.failed") return "ignored";
@@ -179,11 +195,24 @@ async function applyEvent(tx: Tx, event: PaymentEvent, log: Logger): Promise<Exc
 }
 
 // 결제를 from 상태일 때만 to로 바꾼다. provider_ref가 비어 있으면 웹훅의 것으로 채운다(웹훅이 결제 요청의 응답보다 먼저 옴).
+// 결제 상태를 바꾸는 경로는 모두 주문 행을 먼저 잡으므로 0행일 수 없다. 0행이면 그 규칙이 깨진 것이라 던져서 되돌린다(리뷰 L4).
 async function setPaymentStatus(tx: Tx, event: PaymentEvent, from: PaymentStatus, to: PaymentStatus) {
-  await tx
+  const changed = await tx
     .update(payments)
     .set({ status: to, providerRef: sql`coalesce(${payments.providerRef}, ${event.providerRef})`, updatedAt: sql`now()` })
-    .where(and(eq(payments.id, event.paymentId), eq(payments.status, from)));
+    .where(and(eq(payments.id, event.paymentId), eq(payments.status, from)))
+    .returning({ id: payments.id });
+  if (changed.length === 0) throw new Error(`결제 ${event.paymentId}가 ${from}이 아니라 ${to}로 바꾸지 못함`);
+}
+
+// 주문을 pending일 때만 바꾼다. 확정은 주문 행을 쥐고 pending을 확인했으므로 0행이면 던져서 되돌린다.
+async function setOrderFromPending(tx: Tx, orderId: number, values: Partial<typeof orders.$inferInsert>) {
+  const changed = await tx
+    .update(orders)
+    .set({ ...values, updatedAt: sql`now()` })
+    .where(and(eq(orders.id, orderId), eq(orders.status, "pending")))
+    .returning({ id: orders.id });
+  if (changed.length === 0) throw new Error(`주문 ${orderId}가 pending이 아님`);
 }
 
 // 결제 확정(DESIGN 6.2 결제 확정). 주문 행은 부르는 쪽이 잡았고 결제는 requested다.
@@ -192,6 +221,8 @@ async function setPaymentStatus(tx: Tx, event: PaymentEvent, from: PaymentStatus
 // 5. 주문의 좌석을 seat_id 순서로 잠그며 같은 문장에서 확인한다(held, 이 선점, 만료 전). 만료는 advisory lock을 잡은 뒤의
 //    문장 시각(statement_timestamp())으로 본다. now()로 보면 잠금을 기다리다 만료된 확정이 좌석을 팔아 한도를 넘긴다(실험 E3).
 //    잠금은 따로 앞 문장에서 잡는다. 한 문장으로 합치면 statement_timestamp()가 기다리기 전 시각이 된다.
+//    이 문장이 좌석 잠금을 기다리는 사이 만료가 지나도 팔 수 있다. 그 잠금을 쥔 트랜잭션도 만료 전에 시작했으므로
+//    다른 사용자는 그 좌석을 가져가지 못하고, 같은 사용자의 선점은 이 확정이 쥔 advisory lock 뒤에 서 있다(리뷰 N1).
 //    모두 맞으면 좌석 sold, 주문 paid, 결제 succeeded, 표 valid. 하나라도 아니면 좌석은 그대로 두고(정리 작업이 푼다)
 //    주문 cancelled(expired), 결제 refund_pending. 좌석을 쥐고 있어 확인과 쓰기 사이에 바뀌지 않으므로 쓸 때 다시 보지 않는다.
 async function confirmPayment(tx: Tx, orderId: number, event: PaymentEvent, log: Logger) {
@@ -218,10 +249,7 @@ async function confirmPayment(tx: Tx, orderId: number, event: PaymentEvent, log:
        for update of ps
   `);
   if (checked.length === 0 || !checked.every((s) => s.ok)) {
-    await tx
-      .update(orders)
-      .set({ status: "cancelled", cancelReason: "expired", updatedAt: sql`now()` })
-      .where(and(eq(orders.id, orderId), eq(orders.status, "pending")));
+    await setOrderFromPending(tx, orderId, { status: "cancelled", cancelReason: "expired" });
     await setPaymentStatus(tx, event, "requested", "refund_pending");
     log.warn({ event }, "웹훅: 선점이 끝나 확정하지 못하고 환불로 보냄");
     return;
@@ -233,10 +261,7 @@ async function confirmPayment(tx: Tx, orderId: number, event: PaymentEvent, log:
     update performance_seats set status = 'sold'
      where performance_id = ${performanceId} and seat_id = any(${sql.param(seatIds)}::bigint[])
   `);
-  await tx
-    .update(orders)
-    .set({ status: "paid", updatedAt: sql`now()` })
-    .where(and(eq(orders.id, orderId), eq(orders.status, "pending")));
+  await setOrderFromPending(tx, orderId, { status: "paid" });
   await setPaymentStatus(tx, event, "requested", "succeeded");
   await tx.insert(tickets).values(seatIds.map((seatId) => ({ orderId, performanceId, seatId })));
 }

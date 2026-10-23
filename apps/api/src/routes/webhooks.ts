@@ -38,7 +38,8 @@ export const webhookRoutes: FastifyPluginAsyncZod<{ db: Db; provider: FakePaymen
     "/webhooks/fake-pay",
     {
       schema: { body: WebhookBody, response: { 200: WebhookReceived, 401: ErrorResponse } },
-      // 본문을 푼 뒤, 검증하기 전에 서명을 본다. 서명이 틀린 요청은 본문 모양과 상관없이 401이다.
+      // 본문을 푼 뒤, 검증하기 전에 서명을 본다. JSON으로 풀리는 본문이면 서명이 틀린 요청은 모양과 상관없이 401이다.
+      // JSON이 아니면 서명을 보기 전에 400이다. 서명이 맞는데 모양이 틀리면 400이고 남기지 않는다(DESIGN 10장 49).
       preValidation: async (request, reply) => {
         const signature = request.headers[SIGNATURE_HEADER];
         const body = received.get(request);
