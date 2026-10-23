@@ -9,6 +9,8 @@
     "db:migrate": "tsx --env-file-if-exists=../../.env src/db/migrate-cli.ts",
     "db:seed": "tsx --env-file-if-exists=../../.env src/db/seed-cli.ts",
     "admin:promote": "tsx --env-file-if-exists=../../.env src/promote-cli.ts",
+    "e2e:prepare": "tsx src/db/e2e-prepare-cli.ts",
+    "e2e:serve": "tsx src/main.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

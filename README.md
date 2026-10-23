@@ -32,6 +32,13 @@ npm run dev                               # API: http://127.0.0.1:3001
 npm run dev -w @seat-booking/web          # 화면: http://localhost:5173 (/api를 API로 넘긴다)
 ```
 
+E2E(가입 → 선점 → 결제 → 내 예매)는 E2E 전용 DB(`seat_booking_e2e`)와 다른 포트(API 3101, 화면 5174)로 API와 화면을 직접 띄워 돈다. 처음 한 번 브라우저를 받는다.
+
+```sh
+npm exec -w @seat-booking/web -- playwright install --only-shell chromium   # 처음 한 번
+npm run test:e2e -w @seat-booking/web
+```
+
 ## API
 
 | 경로 | 내용 |

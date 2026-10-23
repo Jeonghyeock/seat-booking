@@ -51,3 +51,43 @@ jobs:
       - run: npm test
       # 화면을 묶을 수 있는지(Vite가 shared의 TS 원본까지 묶는다). typecheck와 단위 테스트는 워크스페이스로 위에서 돈다.
       - run: npm run build -w @seat-booking/web
+
+  # 가입 → 선점 → 결제 → 내 예매를 브라우저로 한 번 돈다(DESIGN 6.5 E2E). 따로 띄운 API·화면과 E2E 전용 DB를 쓴다.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: 앱 role 만들기(README의 로컬 준비와 같음)
+        run: |
+          APP_PASSWORD="$(openssl rand -hex 16)"
+          echo "::add-mask::$APP_PASSWORD"
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 \n            -c "CREATE ROLE seat_booking LOGIN CREATEDB PASSWORD '$APP_PASSWORD'" \n            -c "CREATE DATABASE seat_booking OWNER seat_booking"
+          echo "DATABASE_URL=postgres://seat_booking:$APP_PASSWORD@localhost:5432/seat_booking" >> "$GITHUB_ENV"
+      # 브라우저는 캐시하지 않는다(복원이 내려받기와 비슷하게 걸리고, apt 의존성은 캐시할 수 없다).
+      - run: npx playwright install --with-deps --only-shell chromium
+        working-directory: apps/web
+      - run: npm run test:e2e -w @seat-booking/web
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-results
+          path: apps/web/test-results/
+          retention-days: 7
