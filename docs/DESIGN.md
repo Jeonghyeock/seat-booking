@@ -143,7 +143,7 @@
 
 초안의 주문 상태 `refunded`는 결제로 옮겼다. 확정하지 못해 돌려주는 돈은 주문이 아니라 그 결제의 일이고, 결제 후 취소(환불 요청)는 v1에서 하지 않는다(10장 22).
 
-**잠금 순서.** 주문 → 결제 → 사용자·회차 advisory lock → 좌석(`seat_id` 순). 주문 행은 `FOR NO KEY UPDATE`로 잡는다(외래 키 확인 잠금 `FOR KEY SHARE`를 막지 않는다).
+**잠금 순서.** 주문 → 사용자·회차 advisory lock → 좌석(`seat_id` 순) → 결제. 결제 행을 바꾸는 경로는 모두 주문 행을 먼저 잡고, 결제 행은 마지막에 잡는다(환불은 결제만). 주문 행은 `FOR NO KEY UPDATE`로 잡는다(외래 키 확인 잠금 `FOR KEY SHARE`를 막지 않는다).
 
 | 경로 | 잡는 순서 |
 |---|---|
@@ -151,7 +151,7 @@
 | 결제 요청 A | 주문 → 결제 행 INSERT |
 | 결제 요청 B(`provider_ref` 채우기) | 결제만 |
 | 웹훅 받기 | 웹훅 행 INSERT(같은 이벤트가 처리 중이면 `event_id` unique에서 기다린다) → 결제 확정·실패 반영 |
-| 결제 확정(웹훅, 대사) | 주문 → 결제 → advisory → 좌석 |
+| 결제 확정(웹훅, 대사) | 주문 → advisory → 좌석 → 결제(마지막 UPDATE에서). 결제 행은 잠그지 않고 읽는다 |
 | 실패 반영 | 주문 → 결제 |
 | 취소 | 주문 → 좌석 |
 | 선점(2단계) | advisory → 좌석 |
@@ -172,7 +172,7 @@
 | `GET /orders/:id` | - | 주문, 좌석, 결제 전부(최신순), 표. 화면이 웹훅 결과를 기다리며 본다 | 200 `OrderView` / 404 |
 | `POST /orders/:id/payments` | 필수 | 결제 행을 먼저 넣고 가짜 결제사를 부른다. 결과는 웹훅으로 온다 | 202 `{ orderId, paymentId, status }` / 409 `ORDER_NOT_PAYABLE`·`PAYMENT_IN_PROGRESS` / 503 `PAYMENT_PROVIDER_UNAVAILABLE` |
 | `POST /orders/:id/cancel` | 없음 | pending이면 cancelled로 바꾸고 좌석을 푼다. 이미 cancelled면 같은 결과를 돌려준다 | 200 `OrderView` / 409 `ORDER_NOT_CANCELLABLE`(paid) |
-| `POST /webhooks/fake-pay` | 결제사 서명 | 결제 결과를 반영한다 | 200(서명이 맞으면 중복·늦은·모르는 웹훅도 200) / 401(서명 틀림) |
+| `POST /webhooks/fake-pay` | 결제사 서명 | 결제 결과를 반영한다 | 200(서명이 맞으면 중복·늦은·모르는 웹훅도 200) / 401(서명 틀림) / 400(본문 모양이 틀림, 10장 49) |
 
 취소에 멱등 키를 받지 않는 이유: 두 번 와도 두 번째는 0행이라 결과가 같다. 주문 생성과 결제 요청은 두 번 처리되면 행이 하나 더 생긴다(10장 21).
 
@@ -214,13 +214,13 @@
 | cancelled | requested | "결제 결과 확인 중. 결제됐다면 자동 환불됩니다" |
 | cancelled | refund_pending·refunded·refund_failed | 환불 진행 중 / 환불 완료(금액·시각) / 환불 지연, 문의 |
 
-5단계 화면에서 지킬 것(지금 정해 둠): 좌석은 모아 한 번에 선점한다(묶음마다 주문·결제가 따로 생긴다). 화면이 다른 origin에서 돌면 `Retry-After`·`Idempotent-Replayed`를 읽도록 `Access-Control-Expose-Headers`에 넣는다. "내 예매"에는 paid뿐 아니라 결제가 붙은 cancelled 주문(환불 중·완료)도 넣는다. 관리자 판매 현황에 refund_failed 목록을 둔다.
+5단계 화면에서 지킬 것(지금 정해 둠): 좌석은 모아 한 번에 선점한다(묶음마다 주문·결제가 따로 생긴다). 본문 없는 결제 요청에는 `Content-Type`을 붙이지 않는다(빈 본문에 `application/json`이면 400). 화면이 다른 origin에서 돌면 `Retry-After`·`Idempotent-Replayed`를 읽도록 `Access-Control-Expose-Headers`에 넣는다. "내 예매"에는 paid뿐 아니라 결제가 붙은 cancelled 주문(환불 중·완료)도 넣는다. 관리자 판매 현황에 refund_failed 목록을 둔다.
 
 **주문 생성.** 한 트랜잭션에서 선점이 이 사용자의 것이고 만료 전인지, 그 선점의 좌석이 모두 `held`로 남았는지 보고(좌석을 읽는 문장 안에서 `clock_timestamp()`로 만료를 본다. 문장이 기다린 사이 만료되어 다른 선점이 가져간 좌석만 빠진 주문이 생기지 않게), 좌석마다 그때의 등급 가격을 `order_items`에 복사한다. `orders.amount`는 그 합이다. 나중에 `performance_grades`의 가격이 바뀌어도 이미 낸 금액은 그대로다. 선점 하나에 주문 하나(`orders.hold_id` unique)라 다른 키로 두 번 와도 두 번째는 `ORDER_EXISTS`다.
 
 **결제 요청.** 결제사를 부르기 전에 결제 행부터 넣는다.
 
-1. 트랜잭션 A: 주문 행을 잡는다. 먼저 이 주문에서 **같은 멱등 키로 만든 결제를 상태와 상관없이** 찾는다(`payments(order_id, idempotency_key)` unique). 있으면 새로 만들지 않는다. requested면 그 결제 id로 2부터 다시 하고, 다른 상태면 그 결제로 처음과 같은 202를 돌려준다. 이 규칙은 다시 보낸 요청에도 넘겨받은 요청에도 같다(C4: 결제 행 1개). 없을 때만 주문이 pending이고 내 것이고 결제 마감(`payBy`) 전인지 본다(아니면 `ORDER_NOT_PAYABLE`과 reason). 다른 키로 만든 진행 중인 결제(requested)가 있으면 `PAYMENT_IN_PROGRESS`다(부분 unique 인덱스가 마지막 방어다). 결제 행(requested, 금액, 이 요청의 멱등 키)을 넣고 커밋한다. 결제 id는 DB가 만든다.
+1. 트랜잭션 A: 주문 행을 잡는다. 먼저 이 주문에서 **같은 멱등 키로 만든 결제를 상태와 상관없이** 찾는다(`payments(order_id, idempotency_key)` unique). 있으면 새로 만들지 않는다. requested면 결제할 수 있는 주문일 때만 그 결제 id로 2부터 다시 하고(마감이 지났거나 주문이 끝났으면 결제사를 부르지 않고 `ORDER_NOT_PAYABLE`, 결제 행은 대사가 맞춘다, 10장 48), 다른 상태면 그 결제로 처음과 같은 202를 돌려준다. 이 규칙은 다시 보낸 요청에도 넘겨받은 요청에도 같다(C4: 결제 행 1개). 없을 때만 주문이 pending이고 내 것이고 결제 마감(`payBy`) 전인지 본다(아니면 `ORDER_NOT_PAYABLE`과 reason). 다른 키로 만든 진행 중인 결제(requested)가 있으면 `PAYMENT_IN_PROGRESS`다(부분 unique 인덱스가 마지막 방어다). 결제 행(requested, 금액, 이 요청의 멱등 키)을 넣고 커밋한다. 결제 id는 DB가 만든다.
 2. 가짜 결제사를 부른다. 결제 id를 결제사 쪽 멱등 키로 넘기므로, 같은 id로 다시 부르면 같은 결제를 돌려준다. 결제사는 자기 결제 번호(`provider_ref`)를 준다. 결제사 호출에는 따로 시간 제한(3초)을 둔다(`statement_timeout`은 DB 밖의 기다림을 막지 않는다).
 3. 트랜잭션 B: `provider_ref`를 채운다(`WHERE provider_ref IS NULL`. 웹훅이 먼저 와서 채웠으면 0행이고 그대로 둔다). 0행이어도 202 응답과 멱등 응답은 그대로 저장한다.
 
@@ -268,7 +268,7 @@ SKIP LOCKED는 다른 트랜잭션이 잠근 행을 기다리지 않고 건너�
 
 - 정리가 먼저: 좌석이 `available`이 된다. 확정의 5에서 조건이 맞지 않아 주문 cancelled(expired), 결제 refund_pending.
 - 확정이 먼저: 좌석이 `sold`가 된다. 정리는 잠긴 행을 건너뛰고, 다음 번에는 `held`가 아니라 대상이 아니다.
-- 정리가 돌기 전에 만료가 지났다: 확정은 `statement_timestamp()`로 만료를 보고 환불로 간다.
+- 정리가 돌기 전에 만료가 지났다: 확정은 `statement_timestamp()`로 만료를 보고 환불로 간다. 단, 확정이 좌석 잠금을 기다리는 사이 만료가 지나면 판다. 그 잠금을 쥔 트랜잭션도 만료 전에 시작했으므로 다른 사용자가 좌석을 가져가지 못하고, 같은 사용자의 선점은 advisory lock 뒤에 서 있어 한도를 넘지 않는다.
 
 좌석이 두 번 팔리지 않는다. 받은 돈은 좌석으로 바뀌거나(succeeded) 환불로 간다(refund_pending → refunded). failed로 정한 결제에 성공이 늦게 와도 환불로 간다(웹훅 받기 3).
 
@@ -428,8 +428,10 @@ seat-booking/
 40. 쓰기 경로의 시간 제한(문장 5초, 잠금 대기 3초)은 `writeTransaction`이 `set_config(…, true)`로 건다. 걸리면(57014·55P03) 500이고 멱등 키를 지운다. 503과 `Retry-After`로 나누는 것은 6단계 측정 뒤에 본다. (AI 판단, 주문 PR)
 41. `GET /performances/:id/me`는 유효한 선점과 붙은 주문만 보여 준다. 선점이 끝난 주문(결제 완료, 환불 중, 시간 초과)은 여기서 찾을 수 없고, 화면은 주문 id(멱등 키와 함께 `sessionStorage`에 둔다)로 `GET /orders/:id`를 본다. 탭을 닫은 뒤에도 찾는 예매 내역 API(`GET /orders`, 내 주문 목록)는 5단계 "내 예매" 화면과 함께 만든다. 409 `ORDER_NOT_PAYABLE`·`ORDER_NOT_CANCELLABLE`의 "예매 내역"도 그때 생긴다. (AI 판단, /me PR 리뷰 L3)
 42. 가짜 결제사는 웹훅을 개발 서버에서도 `fetch`가 아니라 `app.inject`로 앱의 웹훅 경로에 보낸다. 같은 프로세스라 네트워크가 필요 없고, 서명 확인·본문 검증·응답까지 경로를 그대로 지난다. 포트를 몰라도 되고, 개발과 테스트가 같은 길을 쓴다. (AI 판단, 가짜 결제사 PR)
-43. 결제 요청 202의 status는 그 결제의 지금 상태다. 보통 requested이고, 웹훅이 먼저 왔으면 succeeded, 결제사가 무효로 거절했으면 failed다. (AI 판단, 결제 PR)
+43. 결제 요청 202의 status는 그 결제의 지금 상태다. 보통 requested이고, 웹훅이 먼저 왔으면 succeeded다. 결제사가 무효로 거절했으면 대사가 failed로 바꾼 뒤면 failed, 그 전이면 requested다. (AI 판단, 결제 PR)
 44. 웹훅 응답의 result에는 웹훅 행에 적는 processed·ignored·unmatched 말고 duplicate(이미 처리한 이벤트)가 있다. duplicate는 행을 새로 넣지 않으므로 응답에만 있다. 중간 상태(payment.processing 등) 이벤트는 주문을 잠그지 않고 ignored다. (AI 판단, 결제 PR)
 45. 503 `PAYMENT_PROVIDER_UNAVAILABLE`과 409 `REQUEST_IN_PROGRESS`의 Retry-After는 1초다. 값은 6단계 측정 뒤 다시 본다. (AI 판단, 결제 PR)
 46. 결제 요청은 주문 행을 잠그는 문장과 결제할 수 있는지 보는 문장(결제 마감)을 나눈다. 잠그는 문장의 statement_timestamp()는 잠금을 기다리기 전 시각일 수 있어서다. 확정도 advisory lock을 앞 문장에서 따로 잡는다. (AI 판단, 결제 PR)
 47. 가짜 결제사의 서명 비밀은 FAKE_PAY_SECRET이 없으면 서버를 띄울 때마다 무작위로 만든다. 서명하는 쪽과 확인하는 쪽이 같은 프로세스라 밖에서 받을 필요가 없다. 테스트도 무작위 또는 테스트 파일의 값을 쓴다. (AI 판단, 결제 PR)
+48. 같은 키의 결제가 requested인 채 다시 온 요청도 결제할 수 있는 주문인지 본다. 마감이 지났거나 주문이 끝났으면 결제사를 부르지 않고 409 `ORDER_NOT_PAYABLE`이다(다시 보내도 같아 저장한다). 503 뒤 오래 늦은 재시도가 마감 뒤에 돈을 빼 갔다가 환불하는 일을 막는다. 그 결제 행은 대사가 결제사에 물어 맞춘다(모르면 무효로 하고 failed, 성공했으면 확정 또는 환불). (AI 판단, 결제 PR 리뷰 M1)
+49. 서명이 맞는데 본문 모양이 틀린 웹훅은 400이고 남기지 않는다. 이벤트 id 없이는 웹훅 행(event_id 기본 키)을 넣을 수 없다. 결제사가 형식을 바꾸면 다섯 번 다시 보낸 뒤 버려지고, 결제는 대사가 맞춘다. (AI 판단, 결제 PR 리뷰 L2)

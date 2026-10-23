@@ -216,6 +216,23 @@ describe("결제 요청, 웹훅, 결제 확정", () => {
     }
   });
 
+  it("503 뒤 선점이 끝나고 같은 키로 다시 보내면 결제사를 부르지 않고 ORDER_NOT_PAYABLE이다", async () => {
+    const { userId, order, hold } = await newOrder(1);
+    const key = randomUUID();
+    provider.outage = "down";
+    let paymentId: number;
+    try {
+      paymentId = PaymentProviderUnavailable.parse((await pay(order.orderId, userId, {}, key)).json()).paymentId;
+    } finally {
+      provider.outage = null;
+    }
+    await admin.query("update holds set expires_at = now() - interval '1 second' where id = $1", [hold.holdId]);
+    expect(conflict(await pay(order.orderId, userId, {}, key))).toMatchObject({ code: "ORDER_NOT_PAYABLE", reason: "HOLD_EXPIRED" });
+    // 결제사에는 결제가 없고, 결제 행은 대사가 맞추도록 requested로 남는다
+    expect(await provider.lookup(paymentId)).toEqual({ status: "unknown" });
+    expect((await state(order.orderId)).payments).toEqual(["requested"]);
+  });
+
   it("결제사가 결제를 만들고 응답만 잃어도, 같은 키로 다시 보내면 이중 결제 없이 그 결제다", async () => {
     const { userId, order } = await newOrder();
     const key = randomUUID();
@@ -342,6 +359,30 @@ describe("결제 요청, 웹훅, 결제 확정", () => {
     expect((await state(order.orderId)).status).toBe("paid");
   });
 
+  it("결제사 번호가 이 결제의 것과 다르거나 다른 결제의 것이면 unmatched이고 결제를 바꾸지 않는다", async () => {
+    const event = (paymentId: number, providerRef: string) =>
+      JSON.stringify({ eventId: `evt_${randomUUID()}`, paymentId, providerRef, type: "payment.succeeded" });
+
+    const mine = await newOrder(1);
+    const myPayment = accepted(await pay(mine.order.orderId, mine.userId, { scenario: "lost" }));
+    expect(resultOf(await sendWebhook(event(myPayment.paymentId, "fp_other")))).toBe("unmatched");
+
+    // provider_ref가 빈 결제에 다른 결제의 번호가 오면 채우지 않는다(unique에 걸려 처리가 계속 실패하지 않게)
+    const other = await newOrder(1);
+    provider.outage = "down";
+    let emptyRef: number;
+    try {
+      emptyRef = PaymentProviderUnavailable.parse((await pay(other.order.orderId, other.userId)).json()).paymentId;
+    } finally {
+      provider.outage = null;
+    }
+    const { rows } = await admin.query("select provider_ref from payments where id = $1", [myPayment.paymentId]);
+    expect(resultOf(await sendWebhook(event(emptyRef, rows[0].provider_ref)))).toBe("unmatched");
+
+    expect((await state(mine.order.orderId)).payments).toEqual(["requested"]);
+    expect((await state(other.order.orderId)).payments).toEqual(["requested"]);
+  });
+
   it("모르는 결제의 웹훅은 200 unmatched이고 본문째 남긴다", async () => {
     const raw = JSON.stringify({ eventId: `evt_${randomUUID()}`, paymentId: 999999999, providerRef: "fp_x", type: "payment.succeeded", extra: 1 });
     expect(resultOf(await sendWebhook(raw))).toBe("unmatched");
@@ -377,19 +418,22 @@ describe("결제 요청, 웹훅, 결제 확정", () => {
   });
 
   it("failed로 정한 결제에 성공이 오면 refund_pending이고, 성공한 결제에 실패가 오면 unmatched다", async () => {
-    const event = (paymentId: number, type: string) =>
-      JSON.stringify({ eventId: `evt_${randomUUID()}`, paymentId, providerRef: "fp_late", type });
+    // 결제사가 같은 결제에 늦게 보낸 다른 이벤트다(결제사 번호는 그 결제의 것)
+    const event = async (paymentId: number, type: string) => {
+      const { rows } = await admin.query("select provider_ref from payments where id = $1", [paymentId]);
+      return JSON.stringify({ eventId: `evt_${randomUUID()}`, paymentId, providerRef: rows[0].provider_ref, type });
+    };
 
     const failed = await newOrder(1);
     const failedPayment = accepted(await pay(failed.order.orderId, failed.userId, { scenario: "fail" }));
     await provider.flush();
-    expect(resultOf(await sendWebhook(event(failedPayment.paymentId, "payment.succeeded")))).toBe("processed");
+    expect(resultOf(await sendWebhook(await event(failedPayment.paymentId, "payment.succeeded")))).toBe("processed");
     expect(await state(failed.order.orderId)).toMatchObject({ status: "pending", payments: ["refund_pending"] });
 
     const paid = await newOrder(1);
     const paidPayment = accepted(await pay(paid.order.orderId, paid.userId));
     await provider.flush();
-    expect(resultOf(await sendWebhook(event(paidPayment.paymentId, "payment.failed")))).toBe("unmatched");
+    expect(resultOf(await sendWebhook(await event(paidPayment.paymentId, "payment.failed")))).toBe("unmatched");
     expect(await state(paid.order.orderId)).toMatchObject({ status: "paid", payments: ["succeeded"] });
   });
 
@@ -422,6 +466,13 @@ describe("결제 요청, 웹훅, 결제 확정", () => {
       async (release) => {
         const delivered = provider.flush();
         await waitForLockWaiters(1, "advisory");
+        // 전제: 확정 트랜잭션은 만료 전에 시작했다(now()로 보면 팔았을 것이다)
+        const { rows: started } = await admin.query(
+          `select xact_start < $1 as before_expiry from pg_stat_activity
+            where datname = current_database() and application_name = 'payments-test' and wait_event = 'advisory'`,
+          [expiry[0]!.at],
+        );
+        expect(started).toEqual([{ before_expiry: true }]);
         while ((await admin.query("select now() > $1 as passed", [expiry[0]!.at])).rows[0].passed !== true) {
           await new Promise((r) => setTimeout(r, 50));
         }
@@ -436,6 +487,25 @@ describe("결제 요청, 웹훅, 결제 확정", () => {
       seats: ["held", "held"],
       tickets: 0,
     });
+  });
+
+  it("E2: 확정이 주문 행을 쥔 채 기다리는 동안 다른 키의 결제 요청이 오면, 주문 행에서 줄을 서 교착 없이 PAID를 받는다", async () => {
+    const { userId, order, performanceId } = await newOrder();
+    accepted(await pay(order.orderId, userId));
+    await withHolder(
+      "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+      [`hold:${userId}:${performanceId}`],
+      async (release) => {
+        const delivered = provider.flush();
+        await waitForLockWaiters(1, "advisory");
+        const second = pay(order.orderId, userId);
+        await waitForLockWaiters(2);
+        await release();
+        expect(await delivered).toEqual([200]);
+        expect(conflict(await second)).toMatchObject({ code: "ORDER_NOT_PAYABLE", reason: "PAID" });
+      },
+    );
+    expect(await state(order.orderId)).toMatchObject({ status: "paid", payments: ["succeeded"], tickets: 2 });
   });
 
   it("없는 사용자 401, 남의 주문 404이고, 키 행이 남지 않는다", async () => {
