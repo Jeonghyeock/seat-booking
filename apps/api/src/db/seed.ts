@@ -42,6 +42,31 @@ export function readSeedFile(path: URL): SeedData {
 
 export const SAMPLE_SEED = new URL("../../seed/sample.json", import.meta.url);
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// 개발 시드의 날짜를 지금에 맞춘다(DESIGN 6.5 개발 시드, 10장 71). 샘플의 날짜가 고정이라 그대로면 판매 중인 회차가 없다.
+// 모든 시각을 하루의 배수만큼 옮겨 가장 이른 판매 시작이 지난 24시간 안에 오게 한다.
+// KST에는 일광 절약 시간이 없어 벽시계 시각("전일 17시")이 그대로이고, 모든 시각을 같은 만큼 옮기므로
+// 판매 기간 CHECK와 회차 unique가 그대로 지켜진다. API 테스트는 원래 날짜(readSeedFile)를 쓴다.
+export function shiftSeed(data: SeedData, now: Date): SeedData {
+  const opens = data.shows.flatMap((show) => show.performances.map((p) => Date.parse(p.salesOpenAt)));
+  if (opens.length === 0) return data;
+  const days = Math.floor((Math.min(...opens) - now.getTime()) / DAY_MS) + 1;
+  const shift = (iso: string) => new Date(Date.parse(iso) - days * DAY_MS).toISOString();
+  return {
+    ...data,
+    shows: data.shows.map((show) => ({
+      ...show,
+      performances: show.performances.map((p) => ({
+        ...p,
+        startsAt: shift(p.startsAt),
+        salesOpenAt: shift(p.salesOpenAt),
+        salesCloseAt: shift(p.salesCloseAt),
+      })),
+    })),
+  };
+}
+
 // 공연장·좌석·작품·회차·등급 가격을 넣고, 회차마다 그 공연장의 좌석으로 재고를 만든다. 전부 한 트랜잭션이다.
 export function seed(db: Db, data: SeedData) {
   return db.transaction((tx) => seedInto(tx, data));

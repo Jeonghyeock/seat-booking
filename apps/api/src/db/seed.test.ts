@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, inject, it } from "vitest";
 import { createDb } from "./client.js";
 import { createPool } from "./pool.js";
-import { readSeedFile, SAMPLE_SEED, seed } from "./seed.js";
+import { readSeedFile, SAMPLE_SEED, seed, shiftSeed } from "./seed.js";
 
 // 테스트 DB는 실행 하나에서 여러 테스트 파일이 함께 쓰므로, 개수는 이 테스트가 넣은 공연장·회차로 좁혀 센다.
 describe("샘플 시드", () => {
@@ -203,5 +203,33 @@ describe("제약 조건", () => {
         [performanceIds[0]],
       ),
     ).rejects.toMatchObject({ code: "23505" });
+  });
+});
+
+describe("개발 시드 날짜 옮기기", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const data = readSeedFile(SAMPLE_SEED);
+  const instants = (d: typeof data) =>
+    d.shows.flatMap((s) => s.performances.flatMap((p) => [p.startsAt, p.salesOpenAt, p.salesCloseAt].map(Date.parse)));
+  const kstClock = (iso: string) =>
+    new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit" }).format(new Date(iso));
+
+  it("모든 시각을 같은 날 수만큼 옮겨 가장 이른 판매 시작이 지난 24시간 안에 오고, KST 벽시계 시각은 그대로다", () => {
+    // KST 자정 직후, UTC 자정 직후, 샘플 날짜보다 뒤
+    for (const now of [new Date("2026-10-24T15:00:30Z"), new Date("2026-10-24T00:00:30Z"), new Date("2027-06-01T03:00:00Z")]) {
+      const shifted = shiftSeed(data, now);
+      const deltas = instants(shifted).map((t, i) => t - instants(data)[i]!);
+      expect(new Set(deltas).size, now.toISOString()).toBe(1);
+      expect(Math.abs(deltas[0]!) % DAY).toBe(0);
+      const performances = shifted.shows.flatMap((s) => s.performances);
+      const earliest = Math.min(...performances.map((p) => Date.parse(p.salesOpenAt)));
+      expect(earliest).toBeLessThan(now.getTime());
+      expect(earliest).toBeGreaterThanOrEqual(now.getTime() - DAY);
+      expect(performances.some((p) => Date.parse(p.salesOpenAt) <= now.getTime() && now.getTime() < Date.parse(p.salesCloseAt))).toBe(
+        true,
+      );
+      const original = data.shows.flatMap((s) => s.performances);
+      expect(performances.map((p) => kstClock(p.salesCloseAt))).toEqual(original.map((p) => kstClock(p.salesCloseAt)));
+    }
   });
 });

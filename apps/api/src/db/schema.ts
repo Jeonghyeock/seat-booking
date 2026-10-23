@@ -192,6 +192,8 @@ export const orders = pgTable(
     check("orders_cancel_reason_matches_status", sql`(${t.status} = 'cancelled') = (${t.cancelReason} is not null)`),
     // 정리 작업이 선점이 만료된 pending 주문을 찾는다(DESIGN 6.2 정리 2).
     index("orders_pending_hold_idx").on(t.holdId).where(sql`${t.status} = 'pending'`),
+    // 내 예매(GET /orders)가 내 주문을 최근 것부터 찾는다(DESIGN 6.5).
+    index("orders_user_created_idx").on(t.userId, t.createdAt),
   ],
 );
 

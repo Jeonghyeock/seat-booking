@@ -70,6 +70,7 @@ describe("경로 범위", () => {
     await app.ready();
     expect(app.userRoutes.map((r) => `${r.method} ${r.url}`).sort()).toEqual([
       "GET /auth/me",
+      "GET /orders",
       "GET /orders/:id",
       "GET /performances/:id/me",
       "POST /holds/:id/orders",

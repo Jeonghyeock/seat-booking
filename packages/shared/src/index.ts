@@ -50,8 +50,24 @@ export type AuthError = z.infer<typeof AuthError>;
 // ── 계정(DESIGN 6.3) ──
 
 // 가입·로그인 본문. 이메일은 앞뒤 공백을 지우고 소문자로 바꾼 뒤 형식을 본다(ASCII 이메일만).
-// 비밀번호는 서버가 NFKC로 정규화한 뒤 8~128자인지 본다. 여기서는 정규화 전 원문의 상한만 둔다(큰 입력이 메모리를 쓰지 않게).
+// 비밀번호는 NFKC로 정규화한 뒤 8~128자인지 본다(normalizePassword, 가입 폼과 API가 같이 쓴다).
+// 본문 스키마에는 정규화 전 원문의 상한만 둔다(큰 입력이 메모리를 쓰지 않게).
 export const PASSWORD_MAX_INPUT_LENGTH = 1024;
+export const PASSWORD_MIN_LENGTH = 8;
+export const PASSWORD_MAX_LENGTH = 128;
+
+// 짝이 없는 서로게이트. argon2로 넘길 때 U+FFFD로 바뀌어 서로 다른 비밀번호가 같은 해시로 통과한다.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+// NFKC로 정규화한 비밀번호. 길이(코드 포인트 수)가 맞지 않거나 원문이 너무 길거나 깨진 글자가 있으면 null이다.
+// 원문 상한(1,024칸)을 먼저 본다. NFKC는 글자 하나를 최대 18배로 늘리고(U+FDFA) 줄이기도 해서(한글 자모 셋이 한 글자) 128보다 넉넉히 둔다.
+// 앞뒤 공백은 지우지 않는다. 나중에 정규화를 바꾸면 옛 해시가 맞지 않으므로 처음부터 정한다.
+export function normalizePassword(password: string): string | null {
+  if (password.length > PASSWORD_MAX_INPUT_LENGTH || LONE_SURROGATE.test(password)) return null;
+  const normalized = password.normalize("NFKC");
+  const length = [...normalized].length;
+  return length >= PASSWORD_MIN_LENGTH && length <= PASSWORD_MAX_LENGTH ? normalized : null;
+}
 export const Credentials = z.object({
   email: z.string().trim().toLowerCase().pipe(z.email().max(254)),
   password: z.string().max(PASSWORD_MAX_INPUT_LENGTH),
@@ -213,6 +229,35 @@ export const OrderView = z.object({
   tickets: z.array(z.object({ ticketId: z.number().int().positive(), seatId: z.number().int().positive() })),
 });
 export type OrderView = z.infer<typeof OrderView>;
+
+// 화면이 주문의 상태(결제하기·결제 확인 중·환불 중 등)를 고를 때 보는 필드(DESIGN 6.5 주문 화면의 상태).
+// 주문 조회와 내 예매가 함께 주므로 같은 함수로 고른다.
+export const OrderStatusInput = OrderView.pick({
+  status: true,
+  cancelReason: true,
+  amount: true,
+  holdExpiresAt: true,
+  payBy: true,
+  payments: true,
+});
+export type OrderStatusInput = z.infer<typeof OrderStatusInput>;
+
+// 내 예매(GET /orders, DESIGN 6.5 내 예매). 보이는 상태가 pending·paid인 주문과, failed가 아닌 결제가 붙은 cancelled 주문을
+// 최근에 만든 것부터 100개 준다. 더 있으면 hasMore다. 상태는 주문 조회처럼 보이는 상태다(선점이 지난 pending은 cancelled(expired)).
+export const MyOrder = OrderStatusInput.extend({
+  orderId: z.number().int().positive(),
+  performanceId: z.number().int().positive(),
+  performance: PerformanceSummary,
+  seatCount: z.number().int().nonnegative(),
+  createdAt: z.iso.datetime({ offset: true }),
+});
+export type MyOrder = z.infer<typeof MyOrder>;
+export const MyOrders = z.object({
+  orders: z.array(MyOrder),
+  hasMore: z.boolean(),
+  serverTime: z.iso.datetime({ offset: true }),
+});
+export type MyOrders = z.infer<typeof MyOrders>;
 
 // 취소의 409. 결제가 끝난 주문은 취소할 수 없다(결제 후 취소는 v1에 없다, DESIGN 10장 22). 예매 내역으로 간다.
 export const OrderNotCancellable = z.object({

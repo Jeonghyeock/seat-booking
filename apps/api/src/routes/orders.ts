@@ -5,6 +5,7 @@ import {
   HoldParams,
   IdempotencyHeaders,
   IdempotencyKeyReused,
+  MyOrders,
   OrderNotCancellable,
   OrderParams,
   OrderView,
@@ -14,7 +15,7 @@ import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import type { Db } from "../db/client.js";
 import { holds, orders } from "../db/schema.js";
 import { hashRequest, withIdempotencyKey } from "../idempotency.js";
-import { type CreateOrderFailure, cancelOrder, createOrder, loadOrderView } from "../orders.js";
+import { type CreateOrderFailure, cancelOrder, createOrder, listMyOrders, loadOrderView } from "../orders.js";
 import { sendIdempotent } from "./idempotent-reply.js";
 import { currentUser } from "./session.js";
 
@@ -105,6 +106,13 @@ export const orderRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db }
       }
       return result.view;
     },
+  );
+
+  // 내 예매. 선점이 끝난 주문(결제 완료, 환불 중)도 여기서 다시 찾는다(DESIGN 10장 41).
+  app.get(
+    "/orders",
+    { schema: { response: { 200: MyOrders, 401: AuthError, 403: AuthError } } },
+    async (request) => listMyOrders(db, currentUser(request).id),
   );
 
   app.get(
