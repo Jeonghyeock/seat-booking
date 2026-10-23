@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
 import { hash, verify } from "@node-rs/argon2";
-import { PASSWORD_MAX_INPUT_LENGTH } from "@seat-booking/shared";
 import { and, eq, gt, sql } from "drizzle-orm";
 import type { Db, Tx } from "./db/client.js";
 import { sessions, USER_ROLES, users } from "./db/schema.js";
@@ -18,22 +17,8 @@ export function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
 }
 
-export const PASSWORD_MIN_LENGTH = 8;
-export const PASSWORD_MAX_LENGTH = 128;
-
-// 정규화 전에 볼 원문 길이(UTF-16 칸)의 상한은 본문 스키마와 같은 PASSWORD_MAX_INPUT_LENGTH(1,024)다.
-// NFKC는 글자 하나를 최대 18배로 늘리므로(U+FDFA) 긴 입력을 먼저 버린다. 줄이기도 해서(한글 자모 셋이 한 글자) 128보다 넉넉히 둔다.
-// 짝이 없는 서로게이트. argon2로 넘길 때 U+FFFD로 바뀌어 서로 다른 비밀번호가 같은 해시로 통과한다.
-const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
-
-// NFKC로 정규화한 비밀번호. 길이(코드 포인트 수)가 맞지 않거나 원문이 너무 길거나 깨진 글자가 있으면 null이다.
-// 앞뒤 공백은 지우지 않는다. 나중에 정규화를 바꾸면 옛 해시가 맞지 않으므로 처음부터 정한다.
-export function normalizePassword(password: string): string | null {
-  if (password.length > PASSWORD_MAX_INPUT_LENGTH || LONE_SURROGATE.test(password)) return null;
-  const normalized = password.normalize("NFKC");
-  const length = [...normalized].length;
-  return length >= PASSWORD_MIN_LENGTH && length <= PASSWORD_MAX_LENGTH ? normalized : null;
-}
+// 비밀번호 규칙(NFKC 뒤 8~128자)은 가입 폼도 쓰므로 packages/shared에 있다(DESIGN 10장 77).
+export { normalizePassword, PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH } from "@seat-booking/shared";
 
 // argon2id, OWASP 권장 최소값. 라이브러리의 기본 알고리즘이 argon2id다.
 const ARGON2 = { memoryCost: 19_456, timeCost: 2, parallelism: 1 } as const;

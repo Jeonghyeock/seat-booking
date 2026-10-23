@@ -26,7 +26,7 @@ CREATE DATABASE seat_booking OWNER seat_booking;
 ```sh
 npm ci
 npm run db:migrate -w @seat-booking/api   # 마이그레이션(apps/api/drizzle/)
-npm run db:seed -w @seat-booking/api      # 샘플 공연장·회차로 개발 DB를 다시 채운다
+npm run db:seed -w @seat-booking/api      # 샘플 공연장·회차로 개발 DB를 다시 채운다(날짜는 지금 판매 중이 되게 옮긴다)
 npm test                                  # 템플릿 DB를 복제한 테스트 DB에서 돌고, 끝나면 지운다
 npm run dev                               # http://127.0.0.1:3001
 ```
@@ -45,6 +45,7 @@ npm run dev                               # http://127.0.0.1:3001
 | `POST /performances/:id/holds` | 좌석 1~4개 선점(5분, 공연 시작을 넘지 않는다). 전부 잡거나 하나도 잡지 않는다. 회차당 1인 4석까지(구매 포함). 판매 기간(판매 시작~회차별 판매 종료)이 아니거나, 가격 없는 좌석·이미 선점된 좌석이 있거나, 한도를 넘으면 409(이유별 본문). 판매 종료 전에 잡은 선점은 만료까지 주문·결제할 수 있다(결제 요청은 만료 30초 전까지) |
 | `GET /performances/:id/me` | 이 회차에서 내 유효한 선점(좌석·만료 시각·붙은 주문)과 한도(선점·구매·남은 수), 서버 시각 |
 | `POST /holds/:id/orders` | 선점으로 주문(pending)을 만든다. 좌석과 그때의 가격을 복사한다. `Idempotency-Key` 필수(같은 키로 다시 보내면 처음 응답). 선점 만료·이미 있는 주문·가격 없는 좌석은 409 |
+| `GET /orders` | 내 예매: 결제 대기·결제 완료·환불 중이거나 끝난 주문, 최근 것부터 100개 |
 | `GET /orders/:id` | 주문(좌석·가격·결제·표·결제 마감·서버 시각). 남의 주문은 404 |
 | `POST /orders/:id/cancel` | 결제 전 주문을 취소하고 좌석을 푼다. 이미 취소됐으면 같은 결과, 결제가 끝난 주문은 409. 결제 확인 중에 취소하고 그 결제가 성공하면 환불로 간다 |
 | `POST /orders/:id/payments` | 가짜 결제사에 결제를 요청한다(202, 결과는 웹훅으로). `Idempotency-Key` 필수. 본문 `scenario`로 상황(성공·실패·중복·순서 뒤바뀜·먼저 옴·유실)을 고른다. 결제할 수 없는 주문·진행 중인 결제는 409, 결제사 장애는 503 |

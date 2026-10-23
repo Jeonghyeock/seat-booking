@@ -50,6 +50,13 @@
       "when": 1792745647848,
       "tag": "0006_performance_unique",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792768712224,
+      "tag": "0007_orders_user_index",
+      "breakpoints": true
     }
   ]
 }

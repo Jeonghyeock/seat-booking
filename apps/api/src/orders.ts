@@ -1,5 +1,5 @@
-import type { OrderView } from "@seat-booking/shared";
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import type { MyOrders, OrderView } from "@seat-booking/shared";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { type Db, type Tx, writeTransaction } from "./db/client.js";
 import {
   holds,
@@ -8,9 +8,11 @@ import {
   payments,
   performanceGrades,
   performanceSeats,
+  performances,
   seats,
   tickets,
 } from "./db/schema.js";
+import { performanceSummaries, toSummary } from "./routes/performances.js";
 
 // 결제 마감은 선점 만료 30초 전이다(DESIGN 10장 31).
 export const PAY_MARGIN_SECONDS = 30;
@@ -21,9 +23,21 @@ export type CreateOrderFailure =
   | { code: "PRICE_MISSING"; seatIds: number[] };
 export type CreateOrderResult = { ok: true; view: OrderView } | ({ ok: false } & CreateOrderFailure);
 
+// 화면에 보이는 주문 상태. 선점이 만료된 pending 주문은 정리 작업이 아직 돌지 않았어도 cancelled(expired)다.
+// 좌석 지도가 만료된 선점을 빈 좌석으로 보여 주는 것과 같다. 주문 조회와 내 예매가 함께 쓴다.
+function shownStatus(order: {
+  status: OrderView["status"];
+  cancelReason: OrderView["cancelReason"];
+  holdExpired: boolean;
+}): Pick<OrderView, "status" | "cancelReason"> {
+  const expired = order.status === "pending" && order.holdExpired;
+  return { status: expired ? "cancelled" : order.status, cancelReason: expired ? "expired" : order.cancelReason };
+}
+
+const payByOf = (holdExpiresAt: Date) => new Date(holdExpiresAt.getTime() - PAY_MARGIN_SECONDS * 1000).toISOString();
+
 // 주문 하나를 화면이 받는 모양으로 읽는다(DESIGN 6.2 "화면이 받는 것").
-// 선점이 만료된 pending 주문은 정리 작업이 아직 돌지 않았어도 cancelled(expired)로 보여 준다. 좌석 지도가 만료된 선점을
-// 빈 좌석으로 보여 주는 것과 같다. 시각은 ISO 문자열로 바꿔 두어, 멱등 키에 저장한 응답과 돌려준 응답이 같다.
+// 시각은 ISO 문자열로 바꿔 두어, 멱등 키에 저장한 응답과 돌려준 응답이 같다.
 export async function loadOrderView(db: Db | Tx, orderId: number): Promise<OrderView | undefined> {
   const [order] = await db
     .select({
@@ -73,17 +87,15 @@ export async function loadOrderView(db: Db | Tx, orderId: number): Promise<Order
     .where(and(eq(tickets.orderId, orderId), eq(tickets.status, "valid")))
     .orderBy(asc(tickets.seatId));
 
-  const shownExpired = order.status === "pending" && order.holdExpired;
   return {
     orderId: order.orderId,
     holdId: order.holdId,
     performanceId: order.performanceId,
-    status: shownExpired ? "cancelled" : order.status,
-    cancelReason: shownExpired ? "expired" : order.cancelReason,
+    ...shownStatus(order),
     amount: order.amount,
     items,
     holdExpiresAt: order.holdExpiresAt.toISOString(),
-    payBy: new Date(order.holdExpiresAt.getTime() - PAY_MARGIN_SECONDS * 1000).toISOString(),
+    payBy: payByOf(order.holdExpiresAt),
     serverTime: order.serverTime.toISOString(),
     payments: paymentRows.map((p) => ({
       ...p,
@@ -92,6 +104,95 @@ export async function loadOrderView(db: Db | Tx, orderId: number): Promise<Order
     })),
     tickets: ticketRows,
   };
+}
+
+export const MY_ORDERS_PAGE_SIZE = 100;
+
+// 내 예매(DESIGN 6.5 내 예매, 10장 70). 보이는 상태가 pending·paid인 주문과, failed가 아닌 결제(돈이 움직였을 수 있는 결제)가
+// 붙은 cancelled 주문을 최근에 만든 것부터 100개 준다. 결제 없이 끝났거나 failed만 붙은 주문은 넣지 않는다.
+// 주문·결제·좌석 수를 한 스냅샷에서 읽는다(따로 읽으면 pending 주문에 succeeded 결제가 붙어 보인다, 주문 조회와 같다).
+// 내 주문은 orders(user_id, created_at) 인덱스로 찾는다.
+export async function listMyOrders(db: Db, userId: number): Promise<MyOrders> {
+  return db.transaction(
+    async (tx) => {
+      const rows = await tx
+        .select({
+          orderId: orders.id,
+          performanceId: holds.performanceId,
+          status: orders.status,
+          cancelReason: orders.cancelReason,
+          amount: orders.amount,
+          holdExpiresAt: holds.expiresAt,
+          holdExpired: sql<boolean>`${holds.expiresAt} < now()`,
+          createdAt: orders.createdAt,
+        })
+        .from(orders)
+        .innerJoin(holds, eq(holds.id, orders.holdId))
+        .where(
+          and(
+            eq(orders.userId, userId),
+            sql`(${orders.status} = 'paid'
+                  or (${orders.status} = 'pending' and ${holds.expiresAt} >= now())
+                  or exists (select 1 from ${payments} p where p.order_id = ${orders.id} and p.status <> 'failed'))`,
+          ),
+        )
+        .orderBy(desc(orders.createdAt), desc(orders.id))
+        .limit(MY_ORDERS_PAGE_SIZE + 1);
+      // 목록이 비어도 서버 시각을 준다. sql 조각은 timestamptz를 문자열로 돌려주므로 epoch 밀리초로 받는다.
+      const { rows: clock } = await tx.execute<{ ms: string }>(sql`select extract(epoch from now()) * 1000 as ms`);
+      const serverTime = new Date(Number(clock[0]!.ms)).toISOString();
+
+      const page = rows.slice(0, MY_ORDERS_PAGE_SIZE);
+      const orderIds = page.map((row) => row.orderId);
+      const performanceIds = [...new Set(page.map((row) => row.performanceId))];
+      if (orderIds.length === 0) return { orders: [], hasMore: false, serverTime };
+
+      const paymentRows = await tx
+        .select({
+          orderId: payments.orderId,
+          paymentId: payments.id,
+          status: payments.status,
+          amount: payments.amount,
+          createdAt: payments.createdAt,
+          updatedAt: payments.updatedAt,
+        })
+        .from(payments)
+        .where(inArray(payments.orderId, orderIds))
+        .orderBy(desc(payments.createdAt), desc(payments.id));
+      const seatCounts = await tx
+        .select({ orderId: orderItems.orderId, seats: sql<number>`count(*)::int` })
+        .from(orderItems)
+        .where(inArray(orderItems.orderId, orderIds))
+        .groupBy(orderItems.orderId);
+      const summaries = await performanceSummaries(tx).where(inArray(performances.id, performanceIds));
+
+      const performanceById = new Map(summaries.map((row) => [row.id, toSummary(row)]));
+      const seatsByOrder = new Map(seatCounts.map((row) => [row.orderId, row.seats]));
+      return {
+        orders: page.map((row) => ({
+          orderId: row.orderId,
+          performanceId: row.performanceId,
+          performance: performanceById.get(row.performanceId)!,
+          ...shownStatus(row),
+          amount: row.amount,
+          seatCount: seatsByOrder.get(row.orderId) ?? 0,
+          holdExpiresAt: row.holdExpiresAt.toISOString(),
+          payBy: payByOf(row.holdExpiresAt),
+          createdAt: row.createdAt.toISOString(),
+          payments: paymentRows
+            .filter((p) => p.orderId === row.orderId)
+            .map(({ orderId: _, ...p }) => ({
+              ...p,
+              createdAt: p.createdAt.toISOString(),
+              updatedAt: p.updatedAt.toISOString(),
+            })),
+        })),
+        hasMore: rows.length > MY_ORDERS_PAGE_SIZE,
+        serverTime,
+      };
+    },
+    { isolationLevel: "repeatable read", accessMode: "read only" },
+  );
 }
 
 // 선점으로 주문(pending)을 만든다(DESIGN 6.2 주문 생성). 부르는 쪽이 선점이 이 사용자의 것인지 먼저 확인한다.
