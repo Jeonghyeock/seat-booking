@@ -44,7 +44,10 @@ describe("관리자 경로", () => {
     expect(listed(app.adminRoutes)).toEqual([
       "GET /admin/payments",
       "GET /admin/performances/:id/sales",
+      "GET /admin/shows",
+      "GET /admin/venues",
       "POST /admin/payments/:id/retry-refund",
+      "POST /admin/performances",
     ]);
 
     const anonymous = await unauthenticatedHeaders(pool);

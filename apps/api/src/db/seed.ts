@@ -47,7 +47,6 @@ export function seed(db: Db, data: SeedData) {
 }
 
 // 이미 연 트랜잭션 안에서 넣는다. 중간에 실패하면 그 트랜잭션 전체가 되돌려진다.
-// 좌석이 회차의 공연장 것인지는 DB 제약 대신 여기서 지킨다(재고를 그 공연장의 좌석에서만 뽑는다).
 export async function seedInto(tx: Tx, data: SeedData) {
   const grades = new Set(data.venue.rows.map((r) => r.grade));
   for (const show of data.shows) {
@@ -57,11 +56,32 @@ export async function seedInto(tx: Tx, data: SeedData) {
     }
   }
 
-  const [venue] = await tx.insert(venues).values({ name: data.venue.name }).returning({ id: venues.id });
-  const venueId = venue!.id;
+  const venueId = await insertVenue(tx, data.venue);
+  const performanceIds: number[] = [];
+  for (const show of data.shows) {
+    const [s] = await tx.insert(shows).values({ title: show.title }).returning({ id: shows.id });
+    for (const p of show.performances) {
+      performanceIds.push(
+        await insertPerformance(tx, {
+          showId: s!.id,
+          venueId,
+          startsAt: new Date(p.startsAt),
+          salesOpenAt: new Date(p.salesOpenAt),
+          salesCloseAt: new Date(p.salesCloseAt),
+          prices: p.prices,
+        }),
+      );
+    }
+  }
+  return { venueId, performanceIds };
+}
 
+// 공연장과 좌석 배치를 넣는다. 공연장(좌석 배치) 등록은 시드로만 한다(DESIGN 6.3 관리자 기능).
+export async function insertVenue(tx: Tx, venue: SeedData["venue"]) {
+  const [row] = await tx.insert(venues).values({ name: venue.name }).returning({ id: venues.id });
+  const venueId = row!.id;
   await tx.insert(seats).values(
-    data.venue.rows.flatMap((r) =>
+    venue.rows.flatMap((r) =>
       Array.from({ length: r.seats }, (_, i) => ({
         venueId,
         section: r.section,
@@ -71,32 +91,48 @@ export async function seedInto(tx: Tx, data: SeedData) {
       })),
     ),
   );
+  return venueId;
+}
 
-  const performanceIds: number[] = [];
-  for (const show of data.shows) {
-    const [s] = await tx.insert(shows).values({ title: show.title }).returning({ id: shows.id });
-    for (const p of show.performances) {
-      const [perf] = await tx
-        .insert(performances)
-        .values({
-          showId: s!.id,
-          venueId,
-          startsAt: new Date(p.startsAt),
-          salesOpenAt: new Date(p.salesOpenAt),
-          salesCloseAt: new Date(p.salesCloseAt),
-        })
-        .returning({ id: performances.id });
-      const performanceId = perf!.id;
-      performanceIds.push(performanceId);
+export type NewPerformance = {
+  showId: number;
+  venueId: number;
+  startsAt: Date;
+  salesOpenAt: Date;
+  salesCloseAt: Date;
+  prices: Record<string, number>;
+};
 
-      await tx
-        .insert(performanceGrades)
-        .values(Object.entries(p.prices).map(([grade, price]) => ({ performanceId, grade, price })));
-      await tx.execute(sql`
-        insert into performance_seats (performance_id, seat_id)
-        select ${performanceId}, id from seats where venue_id = ${venueId}
-      `);
-    }
-  }
-  return { venueId, performanceIds };
+// 같은 공연장·같은 공연 시작의 회차가 이미 있다(performances_venue_starts_unique).
+export class DuplicatePerformanceError extends Error {
+  override name = "DuplicatePerformanceError";
+}
+
+// 회차와 등급 가격을 넣고, 그 공연장의 좌석으로 재고를 만든다. 시드와 관리자 회차 등록이 함께 쓴다.
+// 넣을 열을 하나씩 적는다. 등급 가격이 그 공연장 좌석의 등급과 맞는지는 호출자가 본다.
+// 좌석이 회차의 공연장 것인지는 DB 제약 대신 여기서 지킨다(재고를 그 공연장의 좌석에서만 뽑는다).
+// 같은 공연장·공연 시작의 회차가 이미 있으면 DuplicatePerformanceError를 던진다(호출자의 트랜잭션이 되돌려진다).
+export async function insertPerformance(tx: Tx, p: NewPerformance) {
+  const [row] = await tx
+    .insert(performances)
+    .values({
+      showId: p.showId,
+      venueId: p.venueId,
+      startsAt: p.startsAt,
+      salesOpenAt: p.salesOpenAt,
+      salesCloseAt: p.salesCloseAt,
+    })
+    .onConflictDoNothing({ target: [performances.venueId, performances.startsAt] })
+    .returning({ id: performances.id });
+  if (!row) throw new DuplicatePerformanceError(`공연장 ${p.venueId}에 ${p.startsAt.toISOString()} 회차가 이미 있습니다`);
+  const performanceId = row.id;
+
+  await tx
+    .insert(performanceGrades)
+    .values(Object.entries(p.prices).map(([grade, price]) => ({ performanceId, grade, price })));
+  await tx.execute(sql`
+    insert into performance_seats (performance_id, seat_id)
+    select ${performanceId}, id from seats where venue_id = ${p.venueId}
+  `);
+  return performanceId;
 }

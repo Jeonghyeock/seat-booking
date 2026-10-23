@@ -338,3 +338,61 @@ export const PaymentNotRetryable = z.object({
   code: z.literal("PAYMENT_NOT_RETRYABLE"),
   status: PaymentStatus,
 });
+
+// 공연장과 등급별 좌석 수(좌석 배치 순서). 회차 등록 폼이 가격을 받을 등급이다.
+export const AdminVenues = z.object({
+  venues: z.array(
+    z.object({
+      venueId: z.number().int().positive(),
+      name: z.string(),
+      totalSeats: Count,
+      grades: z.array(z.object({ grade: z.string(), seats: Count })),
+    }),
+  ),
+});
+export type AdminVenues = z.infer<typeof AdminVenues>;
+
+// 작품 목록(최근 것부터).
+export const AdminShows = z.object({
+  shows: z.array(z.object({ showId: z.number().int().positive(), title: z.string() })),
+});
+export type AdminShows = z.infer<typeof AdminShows>;
+
+export const PRICE_MAX = 10_000_000;
+
+// 회차 등록 본문. 작품은 있는 것({ id })이나 새 제목({ title })이다. 판매 종료는 필수다(화면이 공연 3시간 전을 미리 채운다).
+// 가격은 그 공연장 좌석의 등급마다 하나씩, 0 이상 1천만 원 이하 정수다. 알 수 없는 키는 버린다.
+export const CreatePerformance = z.object({
+  show: z.union([
+    z.object({ id: z.number().int().positive() }),
+    z.object({ title: z.string().trim().min(1).max(200) }),
+  ]),
+  venueId: z.number().int().positive(),
+  startsAt: z.iso.datetime({ offset: true }),
+  salesOpenAt: z.iso.datetime({ offset: true }),
+  salesCloseAt: z.iso.datetime({ offset: true }),
+  prices: z.record(z.string().min(1).max(50), z.number().int().min(0).max(PRICE_MAX)),
+});
+export type CreatePerformance = z.infer<typeof CreatePerformance>;
+
+// 회차 등록 422: 등록할 수 없는 이유를 모두 준다(폼이 한 번에 보인다).
+// SALES_WINDOW_INVALID: 판매 시작 < 판매 종료 <= 공연 시작이 아니다. MISSING_GRADES·UNKNOWN_GRADES: 가격의 등급이 그 공연장 좌석의 등급과 다르다.
+export const PerformanceProblem = z.discriminatedUnion("reason", [
+  z.object({ reason: z.literal("VENUE_NOT_FOUND") }),
+  z.object({ reason: z.literal("SHOW_NOT_FOUND") }),
+  z.object({ reason: z.literal("SALES_WINDOW_INVALID") }),
+  z.object({ reason: z.literal("MISSING_GRADES"), grades: z.array(z.string()) }),
+  z.object({ reason: z.literal("UNKNOWN_GRADES"), grades: z.array(z.string()) }),
+]);
+export type PerformanceProblem = z.infer<typeof PerformanceProblem>;
+export const PerformanceInvalid = z.object({
+  error: z.string(),
+  code: z.literal("PERFORMANCE_INVALID"),
+  problems: z.array(PerformanceProblem),
+});
+// 회차 등록 409: 같은 공연장·같은 공연 시작의 회차가 이미 있다(두 번 눌렀을 때도). 그 회차 id를 준다.
+export const PerformanceExists = z.object({
+  error: z.string(),
+  code: z.literal("PERFORMANCE_EXISTS"),
+  performanceId: z.number().int().positive(),
+});

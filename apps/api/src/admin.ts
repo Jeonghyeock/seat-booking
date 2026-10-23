@@ -1,8 +1,28 @@
-import type { PerformanceSales, RefundFailedPayments } from "@seat-booking/shared";
-import { and, desc, eq, ne, sql } from "drizzle-orm";
+import type {
+  AdminShows,
+  AdminVenues,
+  CreatePerformance,
+  PerformanceProblem,
+  PerformanceSales,
+  PerformanceSummary,
+  RefundFailedPayments,
+} from "@seat-booking/shared";
+import { and, asc, desc, eq, ne, sql } from "drizzle-orm";
 import { deleteUserSessions, normalizeEmail } from "./auth.js";
 import { type Db, writeTransaction } from "./db/client.js";
-import { holds, orders, PAYMENT_STATUSES, payments, performanceSeats, performances, users } from "./db/schema.js";
+import {
+  holds,
+  orders,
+  PAYMENT_STATUSES,
+  payments,
+  performanceSeats,
+  performances,
+  seats,
+  shows,
+  users,
+  venues,
+} from "./db/schema.js";
+import { DuplicatePerformanceError, insertPerformance } from "./db/seed.js";
 import { performanceSummaries, toSummary } from "./routes/performances.js";
 
 // 관리자 기능(DESIGN 6.3 역할·관리자 기능).
@@ -157,4 +177,86 @@ export async function retryRefund(db: Db, paymentId: number): Promise<RetryRefun
   if (!current) return { ok: false, code: "NOT_FOUND" };
   if (current.status === "refund_pending") return { ok: true, changed: false };
   return { ok: false, code: "PAYMENT_NOT_RETRYABLE", status: current.status };
+}
+
+// ── 회차 등록 ──
+
+// 공연장과 등급별 좌석 수. 등급은 좌석 배치 순서(그 등급의 첫 좌석 id)로 둔다.
+export async function listVenues(db: Db): Promise<AdminVenues> {
+  const rows = await db
+    .select({ venueId: venues.id, name: venues.name, grade: seats.grade, seats: sql<number>`count(*)::int` })
+    .from(venues)
+    .innerJoin(seats, eq(seats.venueId, venues.id))
+    .groupBy(venues.id, venues.name, seats.grade)
+    .orderBy(asc(venues.id), sql`min(${seats.id})`);
+  const byVenue = new Map<number, AdminVenues["venues"][number]>();
+  for (const row of rows) {
+    const venue = byVenue.get(row.venueId) ?? { venueId: row.venueId, name: row.name, totalSeats: 0, grades: [] };
+    venue.totalSeats += row.seats;
+    venue.grades.push({ grade: row.grade, seats: row.seats });
+    byVenue.set(row.venueId, venue);
+  }
+  return { venues: [...byVenue.values()] };
+}
+
+export async function listShows(db: Db): Promise<AdminShows> {
+  const rows = await db.select({ showId: shows.id, title: shows.title }).from(shows).orderBy(desc(shows.id));
+  return { shows: rows };
+}
+
+export type CreatePerformanceResult =
+  | { ok: true; performance: PerformanceSummary }
+  | { ok: false; code: "PERFORMANCE_INVALID"; problems: PerformanceProblem[] }
+  | { ok: false; code: "PERFORMANCE_EXISTS"; performanceId: number };
+
+// 회차를 등록한다. 먼저 앱이 확인해 이유를 모두 모아 PERFORMANCE_INVALID로 거절한다(판매 기간, 등급, 없는 공연장·작품).
+// 회차·등급 가격·재고(그리고 새 작품)를 한 트랜잭션에서 넣는다(시드와 같은 insertPerformance).
+// 같은 공연장·같은 공연 시작의 회차는 unique라, 두 번 눌러도(동시에 와도) 하나만 생기고 나머지는 PERFORMANCE_EXISTS다.
+// 그때 새 작품도 함께 되돌려진다.
+export async function createPerformance(db: Db, input: CreatePerformance): Promise<CreatePerformanceResult> {
+  const startsAt = new Date(input.startsAt);
+  const salesOpenAt = new Date(input.salesOpenAt);
+  const salesCloseAt = new Date(input.salesCloseAt);
+  const problems: PerformanceProblem[] = [];
+
+  const [venue] = await db.select({ id: venues.id }).from(venues).where(eq(venues.id, input.venueId));
+  if (!venue) {
+    problems.push({ reason: "VENUE_NOT_FOUND" });
+  } else {
+    const venueGrades = (
+      await db.selectDistinct({ grade: seats.grade }).from(seats).where(eq(seats.venueId, input.venueId))
+    ).map((row) => row.grade);
+    const missing = venueGrades.filter((grade) => !Object.hasOwn(input.prices, grade)).sort();
+    const unknown = Object.keys(input.prices)
+      .filter((grade) => !venueGrades.includes(grade))
+      .sort();
+    if (missing.length > 0) problems.push({ reason: "MISSING_GRADES", grades: missing });
+    if (unknown.length > 0) problems.push({ reason: "UNKNOWN_GRADES", grades: unknown });
+  }
+  if ("id" in input.show) {
+    const [show] = await db.select({ id: shows.id }).from(shows).where(eq(shows.id, input.show.id));
+    if (!show) problems.push({ reason: "SHOW_NOT_FOUND" });
+  }
+  // DB의 CHECK(performances_sales_window_valid)와 같은 조건이다.
+  if (!(salesOpenAt < salesCloseAt && salesCloseAt <= startsAt)) problems.push({ reason: "SALES_WINDOW_INVALID" });
+  if (problems.length > 0) return { ok: false, code: "PERFORMANCE_INVALID", problems };
+
+  try {
+    const performanceId = await writeTransaction(db, async (tx) => {
+      const showId =
+        "id" in input.show
+          ? input.show.id
+          : (await tx.insert(shows).values({ title: input.show.title }).returning({ id: shows.id }))[0]!.id;
+      return insertPerformance(tx, { showId, venueId: input.venueId, startsAt, salesOpenAt, salesCloseAt, prices: input.prices });
+    });
+    const [created] = await performanceSummaries(db).where(eq(performances.id, performanceId));
+    return { ok: true, performance: toSummary(created!) };
+  } catch (err) {
+    if (!(err instanceof DuplicatePerformanceError)) throw err;
+    const [existing] = await db
+      .select({ id: performances.id })
+      .from(performances)
+      .where(and(eq(performances.venueId, input.venueId), eq(performances.startsAt, startsAt)));
+    return { ok: false, code: "PERFORMANCE_EXISTS", performanceId: existing!.id };
+  }
 }
