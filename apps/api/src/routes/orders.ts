@@ -4,6 +4,7 @@ import {
   HoldParams,
   IdempotencyKeyReused,
   IdempotentUserHeaders,
+  OrderNotCancellable,
   OrderParams,
   OrderView,
   UserHeaders,
@@ -13,7 +14,7 @@ import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import type { Db } from "../db/client.js";
 import { holds, orders, users } from "../db/schema.js";
 import { hashRequest, withIdempotencyKey } from "../idempotency.js";
-import { type CreateOrderFailure, createOrder, loadOrderView } from "../orders.js";
+import { type CreateOrderFailure, cancelOrder, createOrder, loadOrderView } from "../orders.js";
 import { sendIdempotent } from "./idempotent-reply.js";
 
 function conflictBody(failure: CreateOrderFailure): CreateOrderConflict {
@@ -75,6 +76,37 @@ export const orderRoutes: FastifyPluginAsyncZod<{ db: Db }> = async (app, { db }
         return { response: { statusCode: 409, body: conflictBody(result) }, keep: "save" };
       });
       return sendIdempotent(reply, outcome);
+    },
+  );
+
+  app.post(
+    "/orders/:id/cancel",
+    {
+      schema: {
+        params: OrderParams,
+        headers: UserHeaders,
+        response: { 200: OrderView, 401: ErrorResponse, 404: ErrorResponse, 409: OrderNotCancellable },
+      },
+    },
+    async (request, reply) => {
+      const orderId = request.params.id;
+      const userId = request.headers["x-user-id"];
+
+      const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
+      if (!user) return reply.code(401).send({ error: "없는 사용자입니다" });
+      const [order] = await db
+        .select({ id: orders.id })
+        .from(orders)
+        .where(and(eq(orders.id, orderId), eq(orders.userId, userId)));
+      if (!order) return reply.code(404).send({ error: "주문을 찾을 수 없습니다" });
+
+      const result = await cancelOrder(db, orderId);
+      if (!result.ok) {
+        return reply
+          .code(409)
+          .send({ error: "결제가 끝난 주문은 취소할 수 없습니다", code: result.code, orderId: result.orderId });
+      }
+      return result.view;
     },
   );
 

@@ -162,3 +162,50 @@ export function createOrder(
     return { ok: true, view };
   });
 }
+
+export type CancelOrderResult = { ok: true; view: OrderView } | { ok: false; code: "ORDER_NOT_CANCELLABLE"; orderId: number };
+
+// 주문 취소(DESIGN 6.2 취소). 부르는 쪽이 주문이 이 사용자의 것인지 먼저 확인한다.
+// 주문 행을 잡고 pending → cancelled로 바꾼 뒤, 이 선점의 held 좌석을 seat_id 순서로 잠가 빈 좌석으로 되돌린다.
+// status·hold_id·hold_expires_at을 한 UPDATE에서 함께 비워 CHECK 두 개와 맞춘다. 다른 선점이 가져간 좌석(hold_id가 다름)은 건드리지 않는다.
+// 이미 cancelled면 그대로 돌려준다(두 번 와도 결과가 같아 멱등 키를 받지 않는다). paid면 ORDER_NOT_CANCELLABLE.
+// 선점이 이미 만료됐으면 이유는 expired다. 주문 조회가 이미 cancelled(expired)로 보여 준 것과 같게 한다.
+// 진행 중인 결제(requested)가 있어도 취소한다. 그 결제가 나중에 성공하면 확정이 환불로 보낸다(화면은 취소 전에 그것을 알린다).
+// C5: 결제 확정과 겹치면 둘 다 주문 행을 먼저 잡는다. 취소가 이기면 확정은 pending이 아니라 환불로 가고, 확정이 이기면 취소는 409다.
+// 주문 행을 잡는 문장이 상태도 읽는다. 잠금을 기다렸다면 앞 트랜잭션이 바꾼 상태를 본다.
+export function cancelOrder(db: Db, orderId: number): Promise<CancelOrderResult> {
+  return writeTransaction(db, async (tx) => {
+    const [order] = await tx
+      .select({ status: orders.status, holdId: orders.holdId, performanceId: holds.performanceId })
+      .from(orders)
+      .innerJoin(holds, eq(holds.id, orders.holdId))
+      .where(eq(orders.id, orderId))
+      .for("no key update", { of: orders });
+    const { status, holdId, performanceId } = order!;
+    if (status === "paid") return { ok: false, code: "ORDER_NOT_CANCELLABLE", orderId };
+
+    if (status === "pending") {
+      await tx.execute(sql`
+        update orders o
+           set status = 'cancelled',
+               cancel_reason = case when h.expires_at < statement_timestamp() then 'expired' else 'user' end,
+               updated_at = now()
+          from holds h
+         where o.id = ${orderId} and h.id = o.hold_id and o.status = 'pending'
+      `);
+      await tx.execute(sql`
+        with locked as (
+          select seat_id from performance_seats
+           where performance_id = ${performanceId} and hold_id = ${holdId} and status = 'held'
+           order by seat_id
+             for update
+        )
+        update performance_seats ps
+           set status = 'available', hold_id = null, hold_expires_at = null
+          from locked
+         where ps.performance_id = ${performanceId} and ps.seat_id = locked.seat_id
+      `);
+    }
+    return { ok: true, view: (await loadOrderView(tx, orderId))! };
+  });
+}
