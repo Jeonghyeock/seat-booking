@@ -209,23 +209,25 @@ export type CreatePerformanceResult =
   | { ok: false; code: "PERFORMANCE_INVALID"; problems: PerformanceProblem[] }
   | { ok: false; code: "PERFORMANCE_EXISTS"; performanceId: number };
 
-// 회차를 등록한다. 먼저 앱이 확인해 이유를 모두 모아 PERFORMANCE_INVALID로 거절한다(판매 기간, 등급, 없는 공연장·작품).
+// 회차를 등록한다. 먼저 앱이 확인해 이유를 모두 모아 PERFORMANCE_INVALID로 거절한다
+// (없는 공연장·작품, 같은 제목의 작품, 등급, 판매 기간, 이미 지난 판매 종료). 회차·작품은 지울 수 없어서 실수를 먼저 막는다.
 // 회차·등급 가격·재고(그리고 새 작품)를 한 트랜잭션에서 넣는다(시드와 같은 insertPerformance).
 // 같은 공연장·같은 공연 시작의 회차는 unique라, 두 번 눌러도(동시에 와도) 하나만 생기고 나머지는 PERFORMANCE_EXISTS다.
-// 그때 새 작품도 함께 되돌려진다.
+// 그때 새 작품도 함께 되돌려진다. 먼저 넣은 쪽이 끝나기를 잠금 대기 제한(3초) 넘게 기다리면 다른 쓰기 경로처럼 500이다(10장 40).
+// 같은 제목 확인은 잠그지 않으므로, 같은 새 제목으로 다른 회차를 동시에 등록하면 같은 제목의 작품이 둘 생길 수 있다.
 export async function createPerformance(db: Db, input: CreatePerformance): Promise<CreatePerformanceResult> {
   const startsAt = new Date(input.startsAt);
   const salesOpenAt = new Date(input.salesOpenAt);
   const salesCloseAt = new Date(input.salesCloseAt);
   const problems: PerformanceProblem[] = [];
 
-  const [venue] = await db.select({ id: venues.id }).from(venues).where(eq(venues.id, input.venueId));
-  if (!venue) {
+  // 좌석 배치가 없는 공연장은 회차를 둘 수 없으므로 없는 공연장과 같게 본다(공연장 조회도 보이지 않는다).
+  const venueGrades = (
+    await db.selectDistinct({ grade: seats.grade }).from(seats).where(eq(seats.venueId, input.venueId))
+  ).map((row) => row.grade);
+  if (venueGrades.length === 0) {
     problems.push({ reason: "VENUE_NOT_FOUND" });
   } else {
-    const venueGrades = (
-      await db.selectDistinct({ grade: seats.grade }).from(seats).where(eq(seats.venueId, input.venueId))
-    ).map((row) => row.grade);
     const missing = venueGrades.filter((grade) => !Object.hasOwn(input.prices, grade)).sort();
     const unknown = Object.keys(input.prices)
       .filter((grade) => !venueGrades.includes(grade))
@@ -236,9 +238,22 @@ export async function createPerformance(db: Db, input: CreatePerformance): Promi
   if ("id" in input.show) {
     const [show] = await db.select({ id: shows.id }).from(shows).where(eq(shows.id, input.show.id));
     if (!show) problems.push({ reason: "SHOW_NOT_FOUND" });
+  } else {
+    const [same] = await db
+      .select({ id: shows.id })
+      .from(shows)
+      .where(eq(shows.title, input.show.title))
+      .orderBy(asc(shows.id))
+      .limit(1);
+    if (same) problems.push({ reason: "SHOW_TITLE_EXISTS", showId: same.id });
   }
   // DB의 CHECK(performances_sales_window_valid)와 같은 조건이다.
   if (!(salesOpenAt < salesCloseAt && salesCloseAt <= startsAt)) problems.push({ reason: "SALES_WINDOW_INVALID" });
+  // 판매 기간은 DB 시계로 본다(선점과 같다).
+  const { rows } = await db.execute<{ passed: boolean }>(
+    sql`select ${salesCloseAt.toISOString()}::timestamptz <= now() as passed`,
+  );
+  if (rows[0]!.passed) problems.push({ reason: "SALES_CLOSE_PASSED" });
   if (problems.length > 0) return { ok: false, code: "PERFORMANCE_INVALID", problems };
 
   try {
@@ -253,6 +268,7 @@ export async function createPerformance(db: Db, input: CreatePerformance): Promi
     return { ok: true, performance: toSummary(created!) };
   } catch (err) {
     if (!(err instanceof DuplicatePerformanceError)) throw err;
+    // ON CONFLICT는 먼저 넣은 쪽이 끝나기를 기다린 뒤 겹침을 알려 주므로, 그 회차는 이미 커밋되어 보인다(회차 삭제는 없다).
     const [existing] = await db
       .select({ id: performances.id })
       .from(performances)

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { GradeName } from "@seat-booking/shared";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Db, Tx } from "./client.js";
@@ -14,7 +15,7 @@ export const SeedData = z.object({
           section: z.string().min(1),
           row: z.string().min(1),
           seats: z.number().int().positive(),
-          grade: z.string().min(1),
+          grade: GradeName,
         }),
       )
       .min(1),
@@ -27,7 +28,7 @@ export const SeedData = z.object({
           startsAt: z.iso.datetime({ offset: true }),
           salesOpenAt: z.iso.datetime({ offset: true }),
           salesCloseAt: z.iso.datetime({ offset: true }),
-          prices: z.record(z.string(), z.number().int().nonnegative()),
+          prices: z.record(GradeName, z.number().int().nonnegative()),
         }),
       ),
     }),
@@ -47,12 +48,15 @@ export function seed(db: Db, data: SeedData) {
 }
 
 // 이미 연 트랜잭션 안에서 넣는다. 중간에 실패하면 그 트랜잭션 전체가 되돌려진다.
+// 회차의 가격 등급이 공연장 좌석의 등급과 정확히 같아야 한다(관리자 회차 등록과 같은 규칙).
 export async function seedInto(tx: Tx, data: SeedData) {
   const grades = new Set(data.venue.rows.map((r) => r.grade));
   for (const show of data.shows) {
     for (const p of show.performances) {
-      const missing = [...grades].filter((g) => !(g in p.prices));
+      const missing = [...grades].filter((g) => !Object.hasOwn(p.prices, g));
       if (missing.length) throw new Error(`${show.title} ${p.startsAt} 회차에 가격이 없는 등급: ${missing.join(", ")}`);
+      const unknown = Object.keys(p.prices).filter((g) => !grades.has(g));
+      if (unknown.length) throw new Error(`${show.title} ${p.startsAt} 회차에 좌석이 없는 등급: ${unknown.join(", ")}`);
     }
   }
 
@@ -76,21 +80,25 @@ export async function seedInto(tx: Tx, data: SeedData) {
   return { venueId, performanceIds };
 }
 
+// 한 문장의 파라미터는 65,535개까지다. 좌석 하나에 5개라 이만큼씩 나눠 넣는다.
+const SEAT_INSERT_BATCH = 10_000;
+
 // 공연장과 좌석 배치를 넣는다. 공연장(좌석 배치) 등록은 시드로만 한다(DESIGN 6.3 관리자 기능).
 export async function insertVenue(tx: Tx, venue: SeedData["venue"]) {
   const [row] = await tx.insert(venues).values({ name: venue.name }).returning({ id: venues.id });
   const venueId = row!.id;
-  await tx.insert(seats).values(
-    venue.rows.flatMap((r) =>
-      Array.from({ length: r.seats }, (_, i) => ({
-        venueId,
-        section: r.section,
-        rowLabel: r.row,
-        seatNumber: i + 1,
-        grade: r.grade,
-      })),
-    ),
+  const seatRows = venue.rows.flatMap((r) =>
+    Array.from({ length: r.seats }, (_, i) => ({
+      venueId,
+      section: r.section,
+      rowLabel: r.row,
+      seatNumber: i + 1,
+      grade: r.grade,
+    })),
   );
+  for (let i = 0; i < seatRows.length; i += SEAT_INSERT_BATCH) {
+    await tx.insert(seats).values(seatRows.slice(i, i + SEAT_INSERT_BATCH));
+  }
   return venueId;
 }
 

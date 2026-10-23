@@ -14,13 +14,16 @@ import { buildApp } from "../app.js";
 import { createPool } from "../db/pool.js";
 
 describe("관리자 회차 등록", () => {
-  const pool = createPool({ connectionString: inject("databaseUrl") });
+  const url = inject("databaseUrl");
+  const pool = createPool({ connectionString: url });
+  // 잠금을 기다리는 앱 연결만 골라 보려고 이름을 붙인다.
+  const appPool = createPool({ connectionString: url, application_name: "admin-perf-test" });
   // 누가 어느 회차를 만들었는지 로그에서 확인한다.
   const logs: Record<string, unknown>[] = [];
-  const app = buildApp(pool, { logger: { level: "info", stream: { write: (line: string) => logs.push(JSON.parse(line)) } } });
+  const app = buildApp(appPool, { logger: { level: "info", stream: { write: (line: string) => logs.push(JSON.parse(line)) } } });
   afterAll(async () => {
     await app.close();
-    await pool.end();
+    await Promise.all([pool.end(), appPool.end()]);
   });
 
   const newAdmin = async () => (await newSignedInUsers(pool, 1, { role: "admin" }))[0]!;
@@ -122,12 +125,56 @@ describe("관리자 회차 등록", () => {
   });
 
   it("동시에 두 번 눌러도 회차는 하나다", async () => {
-    const { venueId } = await newVenue();
+    const { venueId, showId } = await newVenue();
     const admin = await newAdmin();
-    const payload = body(venueId, { title: `동시 ${randomUUID()}` });
+    const payload = body(venueId, { id: showId });
     const results = await Promise.all([create(admin.headers, payload), create(admin.headers, payload)]);
     expect(results.map((r) => r.statusCode).sort()).toEqual([201, 409]);
     expect(await countPerformances(venueId)).toBe(2);
+  });
+
+  async function waitForLockWaiter() {
+    for (let i = 0; i < 300; i++) {
+      const { rows } = await pool.query(
+        `select count(*)::int as n from pg_stat_activity
+          where datname = current_database() and application_name = 'admin-perf-test' and wait_event_type = 'Lock'`,
+      );
+      if (rows[0].n === 1) return;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error("회차 등록이 잠금을 기다리지 않는다");
+  }
+
+  it("먼저 넣은 같은 회차가 끝나지 않았으면 기다렸다가, 그쪽이 커밋하면 409와 그 회차 id, 되돌리면 201이다", async () => {
+    const { venueId, showId } = await newVenue();
+    const admin = await newAdmin();
+    for (const [startsAt, outcome] of [
+      ["2027-05-01T10:00:00Z", "commit"],
+      ["2027-05-02T10:00:00Z", "rollback"],
+    ] as const) {
+      const holder = await pool.connect();
+      try {
+        await holder.query("begin");
+        const { rows } = await holder.query(
+          `insert into performances (show_id, venue_id, starts_at, sales_open_at, sales_close_at)
+           values ($1, $2, $3, now(), $3) returning id`,
+          [showId, venueId, startsAt],
+        );
+        const pending = create(admin.headers, body(venueId, { id: showId }, { startsAt, salesCloseAt: startsAt }));
+        await waitForLockWaiter();
+        await holder.query(outcome);
+        const res = await pending;
+        if (outcome === "commit") {
+          expect(res.statusCode, res.body).toBe(409);
+          expect(PerformanceExists.parse(res.json()).performanceId).toBe(rows[0].id);
+        } else {
+          expect(res.statusCode, res.body).toBe(201);
+        }
+      } finally {
+        await holder.query("rollback");
+        holder.release();
+      }
+    }
   });
 
   it("등록할 수 없는 이유를 모두 모아 422 PERFORMANCE_INVALID이고 아무것도 넣지 않는다", async () => {
@@ -154,7 +201,21 @@ describe("관리자 회차 등록", () => {
     expect(await problems(body(venueId, { id: showId }, { startsAt, salesCloseAt: at(42 * day + 1000) }))).toEqual([
       { reason: "SALES_WINDOW_INVALID" },
     ]);
+    // 판매 종료가 이미 지났다(공연도 지났다)
+    expect(
+      await problems(body(venueId, { id: showId }, { startsAt: at(-day), salesOpenAt: at(-3 * day), salesCloseAt: at(-2 * day) })),
+    ).toEqual([{ reason: "SALES_CLOSE_PASSED" }]);
+    // 같은 제목의 작품이 이미 있으면 그 작품 id를 준다
+    const { rows } = await pool.query("select title from shows where id = $1", [showId]);
+    const sameTitle = await problems(body(venueId, { title: ` ${rows[0].title}` }));
+    expect(sameTitle).toHaveLength(1);
+    expect(sameTitle[0]).toMatchObject({ reason: "SHOW_TITLE_EXISTS" });
+    // 좌석 배치가 없는 공연장은 없는 공연장과 같다
+    const empty = await pool.query("insert into venues (name) values ('빈 홀') returning id");
+    expect(await problems(body(empty.rows[0].id, { id: showId }, { prices: {} }))).toEqual([{ reason: "VENUE_NOT_FOUND" }]);
+
     expect(await countPerformances(venueId)).toBe(1);
+    expect(logs.some((line) => line.msg === "관리자: 회차 등록 거절" && line.adminId === admin.id)).toBe(true);
   });
 
   it("본문 형식이 틀리면 400이다(가격 범위, 작품 제목 1~200자, 빠진 판매 종료)", async () => {
@@ -168,6 +229,11 @@ describe("관리자 회차 등록", () => {
       ["빈 제목", body(venueId, { title: "   " })],
       ["201자 제목", body(venueId, { title: "가".repeat(201) })],
       ["작품 없음", body(venueId, {})],
+      ["작품 id와 제목이 함께", body(venueId, { id: showId, title: "새 제목" })],
+      ["문자열 id와 제목(select 값)", body(venueId, { id: String(showId), title: "새 제목" })],
+      ["0년 시각", body(venueId, { id: showId }, { salesOpenAt: "0000-01-01T00:00:00Z" })],
+      ["2100년 시각", body(venueId, { id: showId }, { startsAt: "2100-01-01T00:00:00Z" })],
+      ["초 없는 시각", body(venueId, { id: showId }, { startsAt: "2027-03-01T19:00+09:00" })],
       ["판매 종료 없음", withoutClose],
       ["공연장 id 문자열", body(venueId, { id: showId }, { venueId: String(venueId) })],
     ];
