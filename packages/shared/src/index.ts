@@ -181,6 +181,14 @@ export const OrderView = z.object({
 });
 export type OrderView = z.infer<typeof OrderView>;
 
+// 취소의 409. 결제가 끝난 주문은 취소할 수 없다(결제 후 취소는 v1에 없다, DESIGN 10장 22). 예매 내역으로 간다.
+export const OrderNotCancellable = z.object({
+  error: z.string(),
+  code: z.literal("ORDER_NOT_CANCELLABLE"),
+  orderId: z.number().int().positive(),
+});
+export type OrderNotCancellable = z.infer<typeof OrderNotCancellable>;
+
 // 같은 Idempotency-Key의 요청을 아직 처리하고 있다. Retry-After 뒤 같은 키로 다시 보낸다.
 const RequestInProgress = z.object({ error: z.string(), code: z.literal("REQUEST_IN_PROGRESS") });
 
