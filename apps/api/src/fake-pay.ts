@@ -59,8 +59,15 @@ export class FakePaymentProvider {
   private queue: SignedWebhook[] = [];
   private deliver: Deliver | undefined;
   private log: Logger | undefined;
+  // 웹훅을 보낸 수, 다시 보내려고 잡은 수, 다섯 번 다시 보내도 받지 않아 버린 수(부하 측정의 지표, DESIGN 6.6).
+  readonly deliveries = { sent: 0, retried: 0, givenUp: 0 };
 
   constructor(private readonly secret: string) {}
+
+  // 결제사가 아는 결제와 그 결과. 부하 측정이 끝난 뒤 DB와 맞춰 본다(DESIGN 6.6 합격 확인 (e)).
+  listPayments() {
+    return [...this.payments].map(([paymentId, { outcome, refunded }]) => ({ paymentId, outcome, refunded }));
+  }
 
   connect(deliver: Deliver) {
     this.deliver = deliver;
@@ -190,9 +197,11 @@ export class FakePaymentProvider {
     }
     const delay = RETRY_DELAYS_MS[attempt];
     if (delay === undefined) {
+      this.deliveries.givenUp++;
       this.log.warn({ rawBody: webhook.rawBody }, "가짜 결제사: 웹훅을 다섯 번 다시 보내도 받지 않아 버림");
       return;
     }
+    this.deliveries.retried++;
     this.schedule(webhook, delay, attempt + 1);
   }
 
@@ -208,6 +217,7 @@ export class FakePaymentProvider {
 
   // 보내지 못하면(이어지지 않음, 받는 쪽 예외) 0이다. 타이머 모드에서는 그 이유를 로그에 남긴다.
   private async send(webhook: SignedWebhook): Promise<number> {
+    this.deliveries.sent++;
     try {
       if (!this.deliver) throw new Error("가짜 결제사가 웹훅 경로에 이어지지 않았습니다(connect)");
       return await this.deliver(webhook);

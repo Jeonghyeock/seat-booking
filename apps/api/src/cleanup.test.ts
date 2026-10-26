@@ -5,6 +5,7 @@ import { authHeaders, newPerformance, newSignedInUserIds, newSignedInUsers } fro
 import { retryRefund } from "./admin.js";
 import { buildApp } from "./app.js";
 import {
+  type CleanupCounts,
   cancelExpiredOrders,
   deleteExpiredSessions,
   deleteOldIdempotencyKeys,
@@ -472,5 +473,22 @@ describe("정리 작업", () => {
     await expireHold(after.hold.holdId);
     await new Promise((r) => setTimeout(r, 100));
     expect(await seatStatuses(after.performanceId, after.hold.seatIds)).toEqual(["held"]);
+  });
+
+  it("주기 실행은 한 바퀴가 끝날 때마다 처리한 수와 걸린 시간을 onRound에 넘긴다", async () => {
+    const { hold } = await newHold(1);
+    await expireHold(hold.holdId);
+    const rounds: { counts: CleanupCounts; ms: number }[] = [];
+    const stop = startCleanupLoop(db, provider, log, 20, (counts, ms) => rounds.push({ counts, ms }));
+    try {
+      for (let i = 0; i < 100 && rounds.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    } finally {
+      await stop();
+    }
+    expect(rounds[0]!.counts.releasedSeats).toBeGreaterThanOrEqual(1);
+    expect(Object.keys(rounds[0]!.counts).sort()).toEqual(
+      ["cancelledOrders", "deletedKeys", "deletedSessions", "reconciled", "refundFailed", "refunded", "releasedSeats"],
+    );
+    expect(rounds[0]!.ms).toBeGreaterThan(0);
   });
 });

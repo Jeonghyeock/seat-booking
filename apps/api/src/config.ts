@@ -69,3 +69,44 @@ const ProxyEnv = z.object({
 export function loadTrustProxy(env: Record<string, string | undefined>): false | string[] {
   return ProxyEnv.parse(env).TRUST_PROXY;
 }
+
+const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace", "silent"] as const;
+
+// 부하 측정에서 바꾸는 손잡이(DESIGN 6.6 "API에 더할 손잡이"). 기본값은 손잡이를 더하기 전과 같다.
+const ServerEnv = z.object({
+  // 풀 크기. 기본은 pg의 10이다. PostgreSQL의 max_connections(기본 100)를 넘지 않게 1~100만 받는다.
+  DB_POOL_MAX: z
+    .string()
+    .regex(/^(?:[1-9]\d?|100)$/, "DB_POOL_MAX는 1~100의 정수여야 합니다")
+    .default("10")
+    .transform(Number),
+  // 풀에서 연결을 기다리는 시간 한도(ms). 0은 한도 없음(pg의 기본)이다.
+  DB_CONNECT_TIMEOUT_MS: z
+    .string()
+    .regex(/^(?:0|[1-9]\d{0,5})$/, "DB_CONNECT_TIMEOUT_MS는 0~999999의 정수여야 합니다")
+    .default("0")
+    .transform(Number),
+  LOG_LEVEL: z.enum(LOG_LEVELS).default("info"),
+  // 켜면 이 디렉터리에 1초마다 측정 지표를 쓴다(load-stats.ts). 비우면 끈다.
+  LOAD_STATS: z
+    .string()
+    .default("")
+    .transform((value) => value.trim() || null),
+});
+
+export type ServerConfig = {
+  poolMax: number;
+  connectTimeoutMs: number;
+  logLevel: (typeof LOG_LEVELS)[number];
+  loadStatsDir: string | null;
+};
+
+export function loadServerConfig(env: Record<string, string | undefined>): ServerConfig {
+  const parsed = ServerEnv.parse(env);
+  return {
+    poolMax: parsed.DB_POOL_MAX,
+    connectTimeoutMs: parsed.DB_CONNECT_TIMEOUT_MS,
+    logLevel: parsed.LOG_LEVEL,
+    loadStatsDir: parsed.LOAD_STATS,
+  };
+}
