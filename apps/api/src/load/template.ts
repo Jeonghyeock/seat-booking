@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import pg from "pg";
-import { sessionCookieName } from "../auth.js";
+import { hashSessionToken, sessionCookieName } from "../auth.js";
 import { dropDatabase, withAdminClient, withDatabase } from "../db/databases.js";
 import { runMigrations } from "../db/migrate.js";
 import { createPool } from "../db/pool.js";
@@ -68,6 +68,24 @@ export async function setSalesOpen(loadUrl: string, performanceId: number, at: D
   try {
     const { rowCount } = await client.query("update performances set sales_open_at = $2 where id = $1", [performanceId, at]);
     if (rowCount !== 1) throw new Error(`S1 회차(${performanceId})가 없습니다`);
+  } finally {
+    await client.end();
+  }
+}
+
+// 복제한 DB와 load/results의 파일이 같은 템플릿에서 나왔는지 본다. 템플릿은 서버에 하나지만 파일은 작업 트리마다 따로라,
+// 다른 곳에서 템플릿을 다시 만들면 id는 같고 토큰만 달라져 모든 요청이 401이 된다. 쿠키 하나로 그 사용자의 세션을 찾는다.
+export async function verifyTemplateFiles(loadUrl: string, cookieHeader: string, expectedUserId: number) {
+  const token = cookieHeader.slice(cookieHeader.indexOf("=") + 1);
+  const client = new pg.Client({ connectionString: loadUrl });
+  await client.connect();
+  try {
+    const { rows } = await client.query<{ user_id: string }>("select user_id from sessions where token_hash = $1", [
+      hashSessionToken(token),
+    ]);
+    if (Number(rows[0]?.user_id) !== expectedUserId) {
+      throw new Error("템플릿 DB와 load/results의 파일이 맞지 않습니다. npm run load:template으로 둘을 함께 다시 만드세요");
+    }
   } finally {
     await client.end();
   }

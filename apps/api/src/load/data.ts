@@ -160,15 +160,17 @@ export async function seedLoadData(
       [sessions.map((s) => s.tokenHash), userIds, at, SESSION_TTL_SECONDS.customer],
     );
 
-    // 지난 주문. 70%는 paid, 10%는 사용자가 취소(결제가 늦게 성공해 환불됨, 0.1%는 refund_failed), 20%는 만료로 취소(절반은 결제 실패).
-    // paid의 5%는 앞서 실패한 결제가 하나 더 있다.
+    // 지난 주문. mix(o에 바퀴 번호를 더한 값)로 상태를 정한다. o만 쓰면 사용자 수가 10·4·20·1000으로 나누어떨어져
+    // 한 사용자의 주문이 모두 같은 상태가 된다(사용자마다 10건이 7·1·2로 섞이게).
+    // mix의 70%는 paid, 10%는 사용자가 취소(결제가 늦게 성공해 환불됨, 0.1%는 refund_failed), 20%는 만료로 취소(절반은 결제 실패).
+    // 주문의 5%(paid인 것)는 앞서 실패한 결제가 하나 더 있다.
     await q(
       `create temp table load_plan on commit drop as
-       select o, u.id as user_id, p.id as performance_id,
+       select o, o + o / $1::int as mix, u.id as user_id, p.id as performance_id,
               p.sales_open_at + make_interval(mins => o % 997) as created_at,
-              1 + o % 4 as n, (o % $1::int) / $2::int as k,
-              case when o % 10 < 7 then 'paid' else 'cancelled' end as status,
-              case when o % 10 = 7 then 'user' when o % 10 >= 8 then 'expired' end as cancel_reason,
+              1 + (o + o / $1::int) % 4 as n, (o % $1::int) / $2::int as k,
+              case when (o + o / $1::int) % 10 < 7 then 'paid' else 'cancelled' end as status,
+              case when (o + o / $1::int) % 10 = 7 then 'user' when (o + o / $1::int) % 10 >= 8 then 'expired' end as cancel_reason,
               null::bigint as hold_id, null::bigint as order_id
          from generate_series(0, $3::int - 1) o
          join unnest($4::bigint[]) with ordinality u(id, ui) on u.ui - 1 = o % $1::int
@@ -176,10 +178,11 @@ export async function seedLoadData(
          join performances p on p.id = pp.id`,
       [shape.users, groups, shape.historicalOrders, userIds, pastPerformanceIds],
     );
-    // S1 회차의 미리 판 좌석. 산 사람 b가 1, 3, 5, 7 + 8b번째 좌석(0부터 셈)을 산다.
+    // S1 회차의 미리 판 좌석. 산 사람 b가 1, 3, 5, 7 + 8b번째 좌석(0부터 셈)을 산다. 판매 시작 전에 산 것으로 남는다
+    // (실행기가 판매 시작을 T0로 옮긴다). 앞선 실패 결제는 없다(mix 1).
     await q(
       `insert into load_plan
-       select -b, u.id, $2::bigint, $3::timestamptz - interval '1 day' + make_interval(secs => b::int), 4, null, 'paid', null
+       select -b, 1, u.id, $2::bigint, $3::timestamptz - interval '1 day' + make_interval(secs => b::int), 4, null, 'paid', null
          from unnest($1::bigint[]) with ordinality u(id, b)`,
       [buyerIds, s1PerformanceId, at],
     );
@@ -201,10 +204,15 @@ export async function seedLoadData(
          join performance_grades g on g.performance_id = pl.performance_id and g.grade = st.grade`,
       [seatIds],
     );
+    // 시각은 선점 시각 c에서 정한다. 결제 확정(c+1분)에 주문이 paid가 되고 표가 생긴다. 사용자 취소는 c+2분이고 그 뒤 환불(c+3분),
+    // 만료 취소는 선점 만료(c+5분) 뒤 정리 작업이 한다.
     await q(
       `with ins as (
          insert into orders (user_id, hold_id, status, amount, cancel_reason, created_at, updated_at)
-         select pl.user_id, pl.hold_id, pl.status, a.amount, pl.cancel_reason, pl.created_at, pl.created_at + interval '2 minutes'
+         select pl.user_id, pl.hold_id, pl.status, a.amount, pl.cancel_reason, pl.created_at,
+                pl.created_at + case pl.cancel_reason when 'user' then interval '2 minutes'
+                                                      when 'expired' then interval '5 minutes 5 seconds'
+                                                      else interval '1 minute' end
            from load_plan pl join (select o, sum(price)::int as amount from load_plan_seats group by o) a using (o)
           order by pl.o
          returning id, hold_id)
@@ -227,17 +235,16 @@ export async function seedLoadData(
     await q(
       `insert into payments (order_id, provider_ref, status, amount, idempotency_key, refund_attempts, created_at, updated_at)
        select o.id, v.ref, v.status, o.amount, v.key, v.attempts,
-              o.created_at + make_interval(secs => v.after), o.created_at + interval '1 minute'
+              o.created_at + make_interval(secs => v.made), o.created_at + make_interval(secs => v.done)
          from load_plan pl join orders o on o.id = pl.order_id,
          lateral (values
-           (case when pl.status = 'paid' then 'fp_load_' || $1 || '_' || pl.o end, 'succeeded', 'load-' || pl.o, 0, 30,
-            pl.status = 'paid'),
+           ('fp_load_' || $1 || '_' || pl.o, 'succeeded', 'load-' || pl.o, 0, 30, 60, pl.status = 'paid'),
            -- 앞선 실패는 성공보다 먼저 만든 것이다(주문 화면은 가장 최근 결제를 보인다).
-           (null, 'failed', 'load-failed-' || pl.o, 0, 10, pl.status = 'paid' and pl.o % 20 = 0),
-           ('fp_load_' || $1 || '_' || pl.o, case when pl.o % 1000 = 7 then 'refund_failed' else 'refunded' end, 'load-' || pl.o,
-            case when pl.o % 1000 = 7 then 5 else 0 end, 30, pl.cancel_reason = 'user'),
-           (null, 'failed', 'load-' || pl.o, 0, 30, pl.cancel_reason = 'expired' and pl.o % 10 = 8)
-         ) v(ref, status, key, attempts, after, keep)
+           ('fp_load_' || $1 || '_f' || pl.o, 'failed', 'load-failed-' || pl.o, 0, 10, 20, pl.status = 'paid' and pl.mix % 20 = 0),
+           ('fp_load_' || $1 || '_' || pl.o, case when pl.mix % 1000 = 7 then 'refund_failed' else 'refunded' end, 'load-' || pl.o,
+            case when pl.mix % 1000 = 7 then 5 else 0 end, 30, 180, pl.cancel_reason = 'user'),
+           ('fp_load_' || $1 || '_' || pl.o, 'failed', 'load-' || pl.o, 0, 30, 40, pl.cancel_reason = 'expired' and pl.mix % 10 = 8)
+         ) v(ref, status, key, attempts, made, done, keep)
         where v.keep`,
       [tag],
     );
