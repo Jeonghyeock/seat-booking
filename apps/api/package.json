@@ -12,7 +12,8 @@
     "e2e:prepare": "tsx src/db/e2e-prepare-cli.ts",
     "e2e:serve": "tsx src/main.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "load:template": "tsx --env-file-if-exists=../../.env src/load/template-cli.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.3",
