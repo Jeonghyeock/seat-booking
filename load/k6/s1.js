@@ -5,6 +5,7 @@ import { Counter, Trend } from "k6/metrics";
 import {
   availableSeats,
   cookies,
+  countError,
   createOrder,
   errorCode,
   hold,
@@ -78,65 +79,75 @@ function pick(available) {
   return sample(pool, Math.min(n, pool.length));
 }
 
+// 지도를 읽어 빈 좌석을 돌려준다. 응답을 받지 못하면(거절·시간 초과) 1초 뒤 세 번까지 다시 읽고, 끝내 못 읽으면 null이다.
+// 못 읽은 것을 빈 좌석 0개로 보면 "좌석이 없다며 포기"로 잘못 남는다.
+function readMap() {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) sleep(1);
+    const res = seatMap(S1_PERFORMANCE);
+    if (res.status === 200) return availableSeats(res);
+  }
+  return null;
+}
+
+function giveUp(user, reason, attempt) {
+  record({ ev: "gave_up", user, reason, attempt });
+  outcomes.add(1, { outcome: reason });
+}
+
 export function s1() {
   markPhase(exec);
-  const user = exec.vu.idInTest - 1;
+  // VU id는 테스트 전체에서 매기므로 쓰지 않는다. per-vu-iterations에 한 번씩이면 반복 번호가 0..N-1이다.
+  const user = exec.scenario.iterationInTest;
   const cookie = cookies[user];
   // 사용자 5%는 두 탭에서 누르듯 선점을 동시에 서너 번 보낸다(같은 좌석과 다른 좌석).
   const multiTab = user % 20 === 0;
 
   sleepUntil(T0 - WARMUP_MS + Math.random() * (WARMUP_MS - 5000));
-  let available = availableSeats(seatMap(S1_PERFORMANCE));
+  let available = readMap();
   sleepUntil(T0 + Math.random() * 1000);
 
   let held;
   let notOpenRetries = 0;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    if (available.length === 0) {
-      record({ ev: "gave_up", user, reason: "no_seats", attempt });
-      outcomes.add(1, { outcome: "no_seats" });
-      return;
-    }
+    if (available === null) return giveUp(user, "map_failed", attempt);
+    if (available.length === 0) return giveUp(user, "no_seats", attempt);
     const seats = pick(available);
     const started = Date.now();
     let responses;
     if (multiTab && attempt === 1) {
       const tabs = [seats, seats, pick(available)];
       if (Math.random() < 0.5) tabs.push(pick(available));
-      responses = http.batch(tabs.map((ids) => holdParams(cookie, S1_PERFORMANCE, ids))).map((res, i) => ({ res, ids: tabs[i] }));
+      responses = http.batch(tabs.map((ids) => holdParams(cookie, S1_PERFORMANCE, ids))).map((res, i) => {
+        countError(res, "POST /performances/:id/holds");
+        return { res, ids: tabs[i] };
+      });
     } else {
       responses = [{ res: hold(cookie, S1_PERFORMANCE, seats), ids: seats }];
     }
-    const elapsed = Date.now() - started;
+    const answeredAt = Date.now();
     const codes = responses.map(({ res }) => (res.status === 201 ? null : errorCode(res)));
     // T0 직전에 닿았다(PC 시계와 DB 시계의 차이). 시도로 세지 않고 잠깐 뒤 다시 보낸다(5초까지).
-    if (!held && codes.every((code) => code === "SALES_CLOSED") && notOpenRetries < 25) {
+    if (codes.every((code) => code === "SALES_CLOSED") && notOpenRetries < 25) {
       notOpenRetries++;
       attempt--;
       sleep(0.2);
       continue;
     }
-    if (attempt === 1) firstHold.add(elapsed);
+    if (attempt === 1) firstHold.add(answeredAt - started);
     responses.forEach(({ res, ids }, i) => {
-      record({ ev: "hold", user, attempt, seats: ids, status: res.status, code: codes[i], at: started });
+      record({ ev: "hold", user, attempt, seats: ids, status: res.status, code: codes[i], at: started, answeredAt });
       if (res.status === 201 && !held) held = res.json();
     });
     if (held) {
       holdSuccess.add(1, { attempt: String(attempt) });
       break;
     }
-    if (!codes.includes("SEAT_UNAVAILABLE")) {
-      record({ ev: "gave_up", user, reason: "hold_rejected", attempt });
-      outcomes.add(1, { outcome: "hold_rejected" });
-      return;
-    }
-    if (attempt < MAX_ATTEMPTS) available = availableSeats(seatMap(S1_PERFORMANCE));
+    // 다른 사람에게 진 것(SEAT_UNAVAILABLE)만 지도를 다시 읽고 다시 한다. 그 밖의 거절은 실행기의 C2 판정이 따로 본다.
+    if (!codes.includes("SEAT_UNAVAILABLE")) return giveUp(user, "hold_rejected", attempt);
+    if (attempt < MAX_ATTEMPTS) available = readMap();
   }
-  if (!held) {
-    record({ ev: "gave_up", user, reason: "attempts", attempt: MAX_ATTEMPTS });
-    outcomes.add(1, { outcome: "attempts" });
-    return;
-  }
+  if (!held) return giveUp(user, "attempts", MAX_ATTEMPTS);
 
   // 10%는 결제하지 않고 떠난다(반은 선점 뒤, 반은 주문 뒤). 만료와 정리 작업이 좌석을 돌려준다.
   const leave = Math.random();
@@ -155,8 +166,10 @@ export function s1() {
     return;
   }
   const payment = pay(cookie, orderId, paymentScenario());
-  if (payment.status !== 202) {
+  // 재시도를 다 써도 응답이 없거나 5xx면 결제가 됐는지 모른다. 화면처럼 주문 읽기로 결과를 기다린다(10장 76).
+  if (payment.status !== 202 && payment.status !== 0 && payment.status < 500) {
     outcomes.add(1, { outcome: "payment_rejected" });
+    record({ ev: "result", user, orderId, result: "payment_rejected" });
     return;
   }
   // lost는 대사(30초 뒤)가 맞추므로 넉넉히 기다린다.

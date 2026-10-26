@@ -24,7 +24,20 @@ const ROUTES = {
   ],
 };
 const OUTCOMES = {
-  s1: ["paid", "pending", "failed", "cancelled", "no_seats", "hold_rejected", "attempts", "left_after_hold", "left_after_order", "order_failed", "payment_rejected"],
+  s1: [
+    "paid",
+    "pending",
+    "failed",
+    "cancelled",
+    "no_seats",
+    "map_failed",
+    "hold_rejected",
+    "attempts",
+    "left_after_hold",
+    "left_after_order",
+    "order_failed",
+    "payment_rejected",
+  ],
   s3: ["paid", "pending", "failed", "cancelled", "hold_failed", "order_failed", "payment_rejected", "cancel_failed"],
 };
 // 한 반복이 걸리는 시간의 어림(초). 미리 만들어 둘 VU 수를 정한다.
@@ -80,8 +93,8 @@ function arrivalSteps(exec) {
       env: { OFFSET: String(offset) },
     });
     start += seconds;
-    // 한 단계의 반복은 도착률 × 시간을 넘지 않는다.
-    offset += rate * seconds;
+    // 한 단계는 도착률 × 시간보다 하나 더 시작할 수 있다(끝과 타이머의 경쟁, 리뷰 실험). 1초 분량을 더 비워 둔다.
+    offset += rate * seconds + rate;
   }
 }
 
