@@ -234,10 +234,13 @@ export function holdResponses(events: K6Event[]) {
 }
 
 // API 1초 줄의 23505(유효한 표 중복 등 DB 제약), 웹훅 5xx, 그 밖의 5xx.
+// 503은 Retry-After를 붙여 같은 키로 다시 보내라는 응답으로 설계한 것(결제사 호출 시간 초과, 비밀번호 해시가 밀림)이라
+// 실패가 아니라 따로 센다. 기준선 S1에서 결제사 호출이 과부하로 3초를 넘어 503이 났고, 클라이언트가 다시 보내 끝냈다.
 export function serverErrors(ticks: Tick[]) {
   let uniqueViolations = 0;
   let webhook5xx = 0;
-  let other5xx = 0;
+  let unexpected5xx = 0;
+  let retryable503 = 0;
   for (const tick of ticks) {
     if (tick.type !== "tick") continue;
     for (const [name, route] of Object.entries(tick.routes)) {
@@ -245,11 +248,12 @@ export function serverErrors(ticks: Tick[]) {
       for (const [status, count] of Object.entries(route.statuses)) {
         if (Number(status) < 500) continue;
         if (name === "POST /webhooks/fake-pay") webhook5xx += count;
-        else other5xx += count;
+        else if (status === "503") retryable503 += count;
+        else unexpected5xx += count;
       }
     }
   }
-  return { uniqueViolations, webhook5xx, other5xx };
+  return { uniqueViolations, webhook5xx, unexpected5xx, retryable503 };
 }
 
 type C2Parts = {
@@ -257,7 +261,7 @@ type C2Parts = {
   leftovers: Record<string, number>;
   clientFailures: Record<string, number>;
   provider: Record<string, number>;
-  server: { uniqueViolations: number; webhook5xx: number; other5xx: number };
+  server: { uniqueViolations: number; webhook5xx: number; unexpected5xx: number; retryable503: number };
   deadlocks: number;
   holds: { unexpected: number; unknown: number };
   liveness: { neverPicked: number; gaveUpNoSeats: number };
@@ -279,7 +283,8 @@ export function judgeC2(parts: C2Parts) {
   nonZero("남은 일", parts.leftovers);
   nonZero("클라이언트 대조", parts.clientFailures);
   nonZero("결제사 대조", parts.provider);
-  nonZero("서버", parts.server);
+  const { retryable503: _retryable, ...serverFailures } = parts.server;
+  nonZero("서버", serverFailures);
   if (parts.deadlocks !== 0) reasons.push(`교착 ${parts.deadlocks}`);
   if (parts.holds.unexpected !== 0) reasons.push(`예상하지 않은 선점 응답 ${parts.holds.unexpected}`);
   // (f) 아무도 고르지 않은 빈 좌석(측정 내내 비어 있던 좌석)이 남았는데, 지도에 빈 좌석이 없다며 포기한 사용자가 있으면
