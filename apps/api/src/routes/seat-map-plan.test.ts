@@ -1,8 +1,9 @@
+import { PgDialect } from "drizzle-orm/pg-core";
 import { afterAll, describe, expect, inject, it } from "vitest";
 import { createDb } from "../db/client.js";
 import { createPool } from "../db/pool.js";
 import { readSeedFile, SAMPLE_SEED, seed } from "../db/seed.js";
-import { seatMapQuery } from "./performances.js";
+import { seatMapSql } from "./performances.js";
 
 type PlanNode = { "Node Type": string; "Index Name"?: string; Plans?: PlanNode[] };
 
@@ -38,7 +39,7 @@ describe("좌석 지도 조회의 실행 계획", () => {
     );
     await pool.query("analyze performance_seats, seats, performance_grades");
 
-    const query = seatMapQuery(db, performanceIds[0]!).toSQL();
+    const query = new PgDialect().sqlToQuery(seatMapSql(performanceIds[0]!));
     const { rows } = await pool.query<{ "QUERY PLAN": [{ Plan: PlanNode }] }>(
       `explain (format json) ${query.sql}`,
       query.params,
