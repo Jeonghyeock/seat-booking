@@ -497,7 +497,7 @@ bus-review에서는 Supabase가 대신 해 줬던 부분을 직접 만든다. 3�
   - **확인**: 표에 올릴 비교(C7 전후, 고른 풀 크기와 그 이웃)만 조건마다 다섯 번, A와 B를 번갈아(ABAB…) 돌린다. 회차별 값을 모두 적고(가운데 값과 범위), 범위가 겹치지 않을 때만 나아졌다고 쓴다. 세 번의 가운데 값으로는 3대 3이 완전히 갈려도 우연과 구별하기 어렵다.
   - 기계 시간은 탐색 약 1.5시간, 확인 약 1.5시간, C2 약 1시간으로 잡는다.
 - C2는 정확성이라 가운데 값이 아니라 **모든 회차가 통과**해야 한다.
-- 매번 같은 템플릿에서 새 DB를 복제한다(아래 데이터). 측정 동안 autovacuum과 checkpoint가 돌지 않았는지 앞뒤 통계로 확인하고, 돌았으면 그 회차는 무효다.
+- 매번 같은 템플릿에서 새 DB를 복제하고, 부하 DB의 표는 autovacuum을 끈다(아래 데이터). 측정 동안 checkpoint가 돌지 않았는지 앞뒤 통계로 확인하고, 돌았으면 그 회차는 무효다.
 - Node는 P코어(논리 프로세서 0~11, 도구에서 확인)에 묶고 k6는 나머지 E코어에 묶는다. PostgreSQL은 서비스라 관리자 권한 없이 묶을 수 없어 묶지 않는다. 전원 관리, Defender 검사 제외, PostgreSQL 설정도 관리자 권한이 들어 바꾸지 않고 그대로 적는다(`shared_buffers` 128MB, `max_connections` 100).
 - 측정 중에는 다른 무거운 일(빌드, 테스트)을 돌리지 않는다. 1초마다 전체 CPU와 node·postgres·k6의 CPU를 잰다. 다른 프로세스 몫이 크거나 k6가 제 코어를 다 쓰면 그 회차는 무효다(부하를 만드는 쪽이 밀리면 서버가 느린 것처럼 보인다).
 
@@ -509,7 +509,7 @@ bus-review에서는 Supabase가 대신 해 줬던 부분을 직접 만든다. 3�
 **도구.**
 - k6 v2.3.0(나온 지 2주 지난 최신). Windows zip을 받아 함께 올라온 `checksums.txt`의 SHA-256과 맞춰 본 뒤 `%LOCALAPPDATA%\Programs`에 푼다. 저장소에는 넣지 않는다. winget에는 2.2.0까지만 있어 `load/README.md`도 zip으로 안내하고, 실행기가 `k6 version`을 확인한다.
 - `pg_stat_statements`는 쓰지 않는다. `shared_preload_libraries`를 바꾸고 서비스를 다시 띄우려면 관리자 권한이 든다(6.4의 쿼리 분석을 이렇게 바꾼다).
-- `auto_explain`도 쓰지 않는다. Drizzle은 이름 없는 문장을 보내 매번 그 값으로 계획을 세운다(custom plan). 템플릿의 통계는 측정 동안 바뀌지 않는다(autoanalyze가 돌지 않았는지 확인한다). 그래서 끝난 뒤 같은 값으로 돌린 `EXPLAIN (ANALYZE, BUFFERS)`가 측정 중의 계획과 같다. 경합 중에 무엇을 기다렸는지는 표본기가 본다.
+- `auto_explain`도 쓰지 않는다. Drizzle은 이름 없는 문장을 보내 매번 그 값으로 계획을 세운다(custom plan). 템플릿의 통계는 측정 동안 바뀌지 않는다(부하 DB의 표는 autovacuum을 꺼 autoanalyze도 돌지 않는다). 그래서 끝난 뒤 같은 값으로 돌린 `EXPLAIN (ANALYZE, BUFFERS)`가 측정 중의 계획과 같다. 경합 중에 무엇을 기다렸는지는 표본기가 본다.
 - 앱 role은 `track_io_timing`을 켤 수 없어 BUFFERS에 I/O 시간이 없다. 데이터가 모두 메모리에 들어가 I/O 효과는 나타나지 않는다.
 - 프로세스 CPU는 `Get-Counter`로 잰다. 이 PC에서 영문 카운터 경로가 동작한다. `Get-Process`로는 서비스 계정으로 도는 postgres의 CPU를 읽지 못한다.
 
@@ -524,17 +524,18 @@ bus-review에서는 Supabase가 대신 해 줬던 부분을 직접 만든다. 3�
   - 풀에 `application_name`(`seat-booking-api`)을 준다. 표본기가 API의 연결을 가려낸다.
   - IPC 채널로 띄운 경우(`process.send`가 있을 때)에만, `shutdown` 메시지를 받으면 앱을 닫는다. Windows에는 SIGTERM이 없다. 이때 가짜 결제사가 아는 결제 결과를 `LOAD_STATS`에 쓴다(C2 확인 (e)). `npm run dev`는 그대로다.
 
-**데이터.** 부하용 시드는 API가 아니라 SQL(`generate_series`)로 템플릿에 한 번 넣는다(리뷰 실험에서 23초). 인덱스와 계획이 실제 크기에서 정해지게 표가 커야 한다.
+**데이터.** 부하용 시드는 API가 아니라 SQL(`generate_series`)로 템플릿에 한 번 넣는다(`npm run load:template`, 약 20초). 인덱스와 계획이 실제 크기에서 정해지게 표가 커야 한다.
 - 대형 공연장 하나(2,000석, 등급 넷)와 그 공연장의 회차 200개. `performance_seats`는 40만 행이다.
   - **S1 회차** 하나: 모든 좌석에 가격이 있다. 1,000석은 지난 판매처럼 선점·주문·결제·표까지 갖춰 미리 판다. 그래서 판매가 열릴 때 남은 좌석 N은 1,000석이고, 지도에 팔린 좌석과 빈 좌석이 섞인다.
-  - **S3 회차** K개(기본 100): 판매 중이고 모든 좌석에 가격이 있다. 결제 뒤에는 취소가 없어(10장 22) 판 좌석이 돌아오지 않는다. 그래서 K는 재고가 계획한 반복 수 × 좌석 수보다 많게 정한다.
-  - **나머지**: 지난 회차와 그 주문·결제 약 5만 건. **끝난 상태만** 넣는다. 주문은 paid와 cancelled(user, expired), 결제는 succeeded, failed, refunded, refund_failed다. requested나 refund_pending, 만료 전 held를 넣으면 정리 작업이 측정 중에 지난 데이터를 바꾼다.
+  - **S3 회차** K개(기본 99): 판매 중이고 모든 좌석에 가격이 있다. 결제 뒤에는 취소가 없어(10장 22) 판 좌석이 돌아오지 않는다. 그래서 K는 재고가 계획한 반복 수 × 좌석 수보다 많게 정한다.
+  - **나머지**: 지난 회차 100개와 그 주문·결제 약 5만 건(부하 사용자마다 10건, 내 예매가 비어 있지 않다). **끝난 상태만** 넣는다. 주문은 paid와 cancelled(user, expired), 결제는 succeeded, failed, refunded, refund_failed다. requested나 refund_pending, 만료 전 held를 넣으면 정리 작업이 측정 중에 지난 데이터를 바꾼다.
 - 사용자 M=5,000명과 세션.
   - 세션은 행을 바로 넣는다. 토큰과 해시는 앱의 세션 모듈 함수로 만든다. argon2와 가입 속도 제한이 첫 병목으로 잡히지 않게 하려는 것이다.
   - k6가 읽을 Cookie 헤더(`sessionCookieName`으로 정한 이름까지)를 `load/results/`(gitignore)에 쓴다.
   - 세션이 7일 뒤 만료되므로, 6일이 지난 템플릿은 준비 명령이 거절하고 다시 만들게 한다.
 - 템플릿을 만든 뒤 `VACUUM (FREEZE, ANALYZE)`를 한다. 대량으로 넣은 직후에는 통계가 없어 좌석 지도 계획이 다르다(리뷰 실험: Nested Loop·버퍼 8,018에서 Bitmap·버퍼 45로). 그대로 두면 autoanalyze가 측정 중에 계획을 바꾼다.
-- 회차마다 복제한다: `CREATE DATABASE seat_booking_load TEMPLATE seat_booking_load_template STRATEGY FILE_COPY`(약 2초).
+- 그리고 모든 표의 autovacuum을 끈다(`autovacuum_enabled = false`, 복제본이 이어받는다). 복제본은 누적 통계가 0부터라 측정 중에 바꾼 행 수만으로 autoanalyze 기준(표의 10%)을 넘는다. 긴 S3는 좌석 행을 10만 번 넘게 바꾸므로 측정 중간에 autoanalyze와 autovacuum이 돈다. 회차마다 다른 때 돌면 잡음이고, 돌았다고 무효로 하면 긴 회차가 모두 무효가 된다. 대신 끝날 때 표마다 dead tuple 수를 적는다. 운영 DB에서는 켜 둔다(10장 86).
+- 회차마다 복제한다: `CREATE DATABASE seat_booking_load TEMPLATE seat_booking_load_template STRATEGY FILE_COPY`(약 1.3초).
   - FILE_COPY는 스스로 checkpoint를 거니 따로 하지 않는다(앱 role은 `CHECKPOINT`를 할 수 없다).
   - 복제본은 통계와 visibility map을 이어받고, 누적 통계는 0부터다.
   - 복제한 뒤 S1 회차의 `sales_open_at`만 그 회차의 T0로 바꾼다. 다른 시각은 템플릿을 만들 때 한 달 넘게 여유를 둔다.
@@ -581,8 +582,8 @@ bus-review에서는 Supabase가 대신 해 줬던 부분을 직접 만든다. 3�
   - 기준선 한 번은 `--cpu-prof`로 돌려 Node 시간이 어디에 쓰이는지 본다.
 - DB:
   - 0.2초마다 `pg_stat_activity`를 읽어 상태, `wait_event_type`, `wait_event`(advisory, transactionid, tuple 등), 질의 앞부분별로 연결 수를 센다. 조건은 `backend_type = 'client backend'`, 이 DB, 자기 연결 제외다. 표본기 비용은 리뷰 실험에서 한 번에 p50 0.8ms였다.
-  - 앱 role은 다른 role과 백그라운드 프로세스를 볼 수 없다. 그래서 autovacuum은 표 통계의 앞뒤 차이로 본다.
-  - 측정 앞뒤로 다음을 찍는다: `pg_stat_user_tables`(순차·인덱스 탐색, autovacuum·autoanalyze 횟수), `pg_stat_user_indexes`, `pg_stat_database`(deadlocks, xact_rollback, temp_files, blks_hit/read), `pg_stat_checkpointer`.
+  - 앱 role은 다른 role과 백그라운드 프로세스를 볼 수 없다. autovacuum은 꺼 두었고, 꺼져 있었는지는 표 통계의 횟수로 본다.
+  - 측정 앞뒤로 다음을 찍는다: `pg_stat_user_tables`(순차·인덱스 탐색, dead tuple, autovacuum·autoanalyze 횟수), `pg_stat_user_indexes`, `pg_stat_database`(deadlocks, xact_rollback, temp_files, blks_hit/read), `pg_stat_checkpointer`.
   - 결제 확정까지의 시간은 k6의 1초 폴링이 아니라, DB에서 succeeded 결제의 `updated_at − created_at` 분포로 본다.
   - 끝에 주요 질의(좌석 지도, 선점, 주문 생성, 결제 확정, 내 예매, `/me`, 판매 현황)를 `EXPLAIN (ANALYZE, BUFFERS)`로 본다. JIT 줄이 있는지도 본다.
 - 프로세스: 1초마다 전체 CPU와 node, postgres(모든 백엔드 합), k6의 CPU.
@@ -769,8 +770,9 @@ seat-booking/
 78. 6단계는 결과가 아니라 재는 방법을 먼저 정한다. 한 PC라 같은 PC의 전후 비교만 쓴다. 반복은 두 층이다. 탐색은 조건마다 한 번 돌리고, 표에 올릴 비교(C7 전후, 고른 풀 크기와 이웃)만 다섯 번씩 번갈아(ABAB) 돌려 회차 값을 모두 적는다. 범위가 겹치지 않을 때만 나아졌다고 쓴다. 모든 조건을 다섯 번씩 돌리면 기계 시간이 하루를 넘는다. C2는 모든 회차가 통과해야 한다. (AI 판단, 방법론 리뷰 M7·M5)
 79. 부하 도구는 k6 v2.3.0이다. 체크섬을 확인한 zip을 저장소 밖에 둔다(winget은 2.2.0까지라 쓰지 않는다). 부하용 DB는 템플릿 `seat_booking_load_template`에 한 번 시드하고 `VACUUM (FREEZE, ANALYZE)`한 뒤, 회차마다 `STRATEGY FILE_COPY`로 복제한다. 포트는 3201, 주소는 `127.0.0.1`이고 CI에는 넣지 않는다. `pg_stat_statements`와 `auto_explain` 대신 `pg_stat_activity` 0.2초 표본, 앞뒤 통계, `EXPLAIN (ANALYZE, BUFFERS)`를 쓴다. Node는 P코어, k6는 E코어에 묶는다. 관리자 권한이 드는 것(PostgreSQL 설정, 서비스 affinity, 전원, Defender)은 바꾸지 않고 적는다. (AI 판단, 방법론 리뷰 M7·L, 실현성 리뷰 M3·M5·L3·L5)
 80. API에 측정용 손잡이 `DB_POOL_MAX`·`DB_CONNECT_TIMEOUT_MS`·`LOG_LEVEL`·`LOAD_STATS`를 더한다. 기본값은 지금과 같고, 부하는 `LOG_LEVEL=warn`으로 잰다. `LOAD_STATS`는 로그가 아닌 파일에 1초마다 풀(연결 대기 시간 포함), Node(이벤트 루프 지연·사용률, CPU, GC), 경로별(처리 시간, 상태, SQLSTATE), 정리 작업 지표를 쓴다. Windows에서 강제로 끝내도 남게, 끝에 한 번 쓰는 값에 기대지 않는다. 풀에 `application_name`을 주고, IPC로 띄운 경우에만 `shutdown` 메시지로 앱을 닫는다. (AI 판단, 방법론 리뷰 H1·M4·L, 실현성 리뷰 H2·M1·L1·L2)
-81. 부하 데이터는 SQL로 템플릿에 한 번 넣는다. 2,000석 공연장 하나와 회차 200개(`performance_seats` 40만 행)다. S1 회차는 1,000석을 선점·주문·결제·표까지 갖춰 미리 판다(N=1,000). S3 회차 K개(기본 100)는 재고다. 나머지는 끝난 상태만 넣은 지난 주문·결제 약 5만 건이다. 사용자 5,000명과 세션을 넣는다(argon2를 거치지 않는다). 복제한 뒤 S1 회차의 `sales_open_at`만 T0로 바꾼다. (AI 판단, 실현성 리뷰 M2·L6)
+81. 부하 데이터는 SQL로 템플릿에 한 번 넣는다. 2,000석 공연장 하나와 회차 200개(`performance_seats` 40만 행)다. S1 회차는 1,000석을 선점·주문·결제·표까지 갖춰 미리 판다(N=1,000). S3 회차 99개는 재고다. 나머지 지난 회차 100개에는 끝난 상태만 넣은 지난 주문·결제 약 5만 건이 있다. 사용자 5,000명과 세션을 넣는다(argon2를 거치지 않는다). 복제한 뒤 S1 회차의 `sales_open_at`만 T0로 바꾼다. (AI 판단, 실현성 리뷰 M2·L6)
 82. C7과 1장의 이력서 주장을 "측정이 가리킨 병목을 고친다"로 고친다. 리뷰가 잰 좌석 지도는 DB보다 Node CPU에서 먼저 막혔다(요청당 약 5ms, 그 가운데 pg 결과 파싱·매핑이 약 3ms). "인덱스 개선 전후"로 정해 두면 측정과 상관없이 인덱스를 더하게 된다. 3장 C7은 "p95를 개선 전후로 잰다(숫자). 개선은 측정이 가리킨 병목"으로, 1장은 "측정으로 병목을 찾아 고쳐 응답 시간을 줄였다"로 바꾼다. (AI 판단, 방법론 리뷰 H1, 실현성 리뷰 H2)
 83. C7의 기준 숫자는 이렇게 잰다. 먼저 S2만으로 꺾이는 점(p95 100ms 미만과 `dropped_iterations` 0을 지키는 가장 큰 도착률)을 찾는다. 그 70% 도착률로 S3 흐름을 함께 보내며, 예열 30초를 빼고 3분을 잰다. S1과 함께 재지 않는다. 몰림이 끝나는 시점이 개선에 따라 달라져 p95가 움직인다. 꺾이는 점도 개선 전후로 적는다. (AI 판단, 방법론 리뷰 H2, 실현성 리뷰 H2)
 84. 풀 크기는 S3(좌석 경합 없음)로 정한다. 풀 크기 5·10·20·40에서 도착률을 단계로 올려, 쓰기 경로별 p95 300ms 미만·예상하지 않은 오류 0.1% 미만·`dropped_iterations` 0을 지키는 가장 큰 도착률로 견준다. 가장 좋은 값의 95% 안에 드는 가장 작은 풀을 고른다. 경합이 있는 S1 hot set에서도 10과 20을 견준다. (AI 판단, 방법론 리뷰 H3)
 85. S1은 판매 전 60초 동안 각자 지도를 읽어 연결을 연 뒤, T0에 0~1초 안에 첫 선점을 보낸다(5,000개의 첫 연결이 한꺼번에 열리면 이 PC에서 84%가 거절된다). 좌석은 균일·hot set 두 가지로 고르고, 결제 시나리오를 섞고, 10%는 결제하지 않고 떠난다. p95 대신 매진까지의 시간, 첫 선점 응답 분포, 시도별 성공, 코드별 오류를 보고한다. C2는 (a)~(f)를 모든 회차에서 확인한다. (AI 판단, 방법론 리뷰 M5·M6, 실현성 리뷰 H1·L7)
+86. 부하 DB의 표는 autovacuum을 끈다(템플릿에서 `autovacuum_enabled = false`, 복제본이 이어받는다). 복제본은 누적 통계가 0부터라, 긴 S3가 좌석 행을 10만 번 넘게 바꾸면 측정 중간에 autoanalyze가 돈다. "돌면 무효"로 두면 긴 회차가 모두 무효가 되고, 그대로 두면 회차마다 다른 때 돌아 잡음이다. 끝날 때 표마다 dead tuple 수를 적는다. 운영 DB에서는 켜 둔다. (AI 판단, 템플릿을 만들어 본 뒤)
