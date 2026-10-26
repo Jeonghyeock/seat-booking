@@ -34,6 +34,7 @@ export function buildApp(
     authRateLimitPerMinute: services.auth?.authRateLimitPerMinute ?? 10,
   };
   // 요청은 packages/shared의 zod 스키마로 검증하고, 응답도 같은 스키마로 직렬화한다.
+  // 좌석 지도만은 DB가 만든 JSON 글자를 그대로 보낸다(직렬화를 거치지 않음, routes/performances.ts·DESIGN 10장 88).
   const app = Fastify(options).withTypeProvider<ZodTypeProvider>();
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
