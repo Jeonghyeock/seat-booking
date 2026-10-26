@@ -35,8 +35,9 @@ const { values: args } = parseArgs({
   options: {
     scenarios: { type: "string" },
     label: { type: "string", default: "run" },
-    pool: { type: "string", default: "10" },
-    "connect-timeout": { type: "string", default: "0" },
+    // 주지 않으면 API의 기본값(config.ts)을 쓴다. 측정의 "기본"이 앱의 기본과 같게.
+    pool: { type: "string" },
+    "connect-timeout": { type: "string" },
     "s1-mode": { type: "string", default: "uniform" },
     "s1-users": { type: "string" },
     "s1-warmup": { type: "string", default: "60" },
@@ -179,8 +180,8 @@ try {
     AUTH_RATE_LIMIT_PER_MINUTE: "10",
     TRUST_PROXY: "",
     FAKE_PAY_SECRET: randomBytes(32).toString("hex"),
-    DB_POOL_MAX: args.pool,
-    DB_CONNECT_TIMEOUT_MS: args["connect-timeout"],
+    ...(args.pool ? { DB_POOL_MAX: args.pool } : {}),
+    ...(args["connect-timeout"] ? { DB_CONNECT_TIMEOUT_MS: args["connect-timeout"] } : {}),
     LOG_LEVEL: "warn",
     LOAD_STATS: path.join(runDir, "api"),
   };
@@ -386,7 +387,7 @@ writeFileSync(path.join(runDir, "run.json"), JSON.stringify(report, null, 1));
 const lines = [
   `# ${args.label} (${started.toISOString()})`,
   "",
-  `풀 ${args.pool}, k6 종료 ${k6Code}, API 종료 ${apiCode}, checkpoint ${stats?.checkpoints ?? "-"}, 교착 ${stats?.deadlocks ?? "-"}, ` +
+  `풀 ${args.pool ?? "기본"}, k6 종료 ${k6Code}, API 종료 ${apiCode}, checkpoint ${stats?.checkpoints ?? "-"}, 교착 ${stats?.deadlocks ?? "-"}, ` +
     `측정 전 다른 프로세스 CPU ${othersBaseline}%(한 코어 = 100)`,
 ];
 if (report.error) lines.push("", `실패: ${report.error}`);
