@@ -66,14 +66,38 @@ describe("부하 측정 지표(LOAD_STATS)", () => {
     expect(tick.pool.waiting).toBe(0);
   });
 
-  it("Node 지표(이벤트 루프 사용률·지연, CPU, GC, 힙)를 쓴다", () => {
-    const { node } = lastLine();
-    expect(node.elu).toBeGreaterThanOrEqual(0);
-    expect(node.elu).toBeLessThanOrEqual(1);
-    for (const value of [node.cpuPct, node.loopDelayMs.p50, node.loopDelayMs.p99, node.loopDelayMs.max, node.gcMs, node.gcCount]) {
-      expect(value).toBeGreaterThanOrEqual(0);
+  it("Node 지표(이벤트 루프 사용률·지연, CPU)는 그 줄 동안의 값이다. GC와 힙도 쓴다", async () => {
+    // 타이머 콜백 안에서 200ms 동안 이벤트 루프를 막는다. 지연은 막힌 뒤 표본 타이머가 울릴 때 적히므로 한 번 양보한다.
+    // 표본 타이머가 같은 단계에서 먼저 돌면 그 막힘이 지연으로 잡히지 않을 때가 있어(실험) 잡힐 때까지 몇 번 한다.
+    const blockInTimer = async () => {
+      await new Promise<void>((resolve) =>
+        setTimeout(() => {
+          const until = performance.now() + 200;
+          while (performance.now() < until);
+          resolve();
+        }, 5),
+      );
+      await new Promise((r) => setTimeout(r, 20));
+    };
+    let busy = lastLine().node;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await blockInTimer();
+      busy = lastLine().node;
+      if (busy.loopDelayMs.max >= 150) break;
     }
-    expect(node.heapMb).toBeGreaterThan(0);
+    expect(busy.elu).toBeGreaterThan(0.5);
+    expect(busy.cpuPct).toBeGreaterThan(50);
+    expect(busy.cpuPct).toBeLessThan(200);
+    expect(busy.loopDelayMs.max).toBeGreaterThanOrEqual(150);
+    await new Promise((r) => setTimeout(r, 100));
+    const idle = lastLine().node;
+    expect(idle.elu).toBeLessThan(0.5);
+    expect(idle.cpuPct).toBeLessThan(50);
+    // 표본 간격(10ms)을 뺀 값이라 쉬면 0에 가깝다.
+    expect(idle.loopDelayMs.max).toBeLessThan(150);
+    expect(idle.loopDelayMs.p50).toBeLessThan(5);
+    for (const value of [idle.gcMs, idle.gcCount]) expect(value).toBeGreaterThanOrEqual(0);
+    expect(idle.heapMb).toBeGreaterThan(0);
   });
 
   it("다음 줄은 지난 줄 뒤의 값만 쓴다", async () => {
@@ -83,6 +107,27 @@ describe("부하 측정 지표(LOAD_STATS)", () => {
     expect(tick.routes).toEqual({});
     expect(tick.pool.connectWait).toBeNull();
     expect(tick.cleanup).toEqual([]);
+    expect(tick.webhooks).toEqual({ sent: 0, retried: 0, givenUp: 0 });
+  });
+
+  it("연결을 받지 못한 것(대기 한도)을 연결 오류로 세고, 새로 맺은 연결 수를 쓴다. 그 오류의 코드는 POOL_TIMEOUT이다", async () => {
+    // 한도는 새 연결을 맺는 시간에도 걸리므로, 첫 연결이 다른 테스트 파일과 겹쳐 늦어도 맺어지게 넉넉히 둔다.
+    const small = createPool({ connectionString: inject("databaseUrl"), max: 1, connectionTimeoutMillis: 1000 });
+    const smallDir = mkdtempSync(path.join(tmpdir(), "load-stats-small-"));
+    const smallStats = createLoadStats({ dir: smallDir, pool: small, provider, config, intervalMs: 3_600_000 });
+    try {
+      const held = await small.connect();
+      const errors = await Promise.all([small.query("select 1").catch((e: unknown) => e), small.connect().catch((e: unknown) => e)]);
+      held.release();
+      smallStats.flush();
+      const tick = readFileSync(path.join(smallDir, "api-stats.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).at(-1);
+      expect(tick.pool).toMatchObject({ connectErrors: 2, newConnections: 1 });
+      expect(tick.pool.connectWait.count).toBe(3);
+      expect(errors.map(errorCode)).toEqual(["POOL_TIMEOUT", "POOL_TIMEOUT"]);
+    } finally {
+      await small.end();
+      rmSync(smallDir, { recursive: true, force: true });
+    }
   });
 
   it("웹훅도 경로별에 잡히고, 가짜 결제사가 보낸 수를 쓴다. 정리 작업 한 바퀴도 쓴다", async () => {
@@ -94,6 +139,34 @@ describe("부하 측정 지표(LOAD_STATS)", () => {
     expect(tick.routes["POST /webhooks/fake-pay"].count).toBe(1);
     expect(tick.webhooks).toEqual({ sent: 1, retried: 0, givenUp: 0 });
     expect(tick.cleanup).toEqual([{ ...counts, ms: 12.35 }]);
+    expect(lastLine().webhooks).toEqual({ sent: 0, retried: 0, givenUp: 0 });
+  });
+
+  it("클라이언트가 응답 전에 끊은 요청은 aborted로 센다", async () => {
+    // 끊으려면 실제 소켓이 있어야 해서, 느린 경로를 더한 앱을 따로 만들어 임의 포트로 띄운다(풀과 결제사도 따로 둔다).
+    const slowDir = mkdtempSync(path.join(tmpdir(), "load-stats-slow-"));
+    const slowPool = createPool({ connectionString: inject("databaseUrl") });
+    const slowProvider = new FakePaymentProvider("load-stats-slow-secret");
+    const slowStats = createLoadStats({ dir: slowDir, pool: slowPool, provider: slowProvider, config, intervalMs: 3_600_000 });
+    const slow = buildApp(slowPool, {}, { paymentProvider: slowProvider });
+    slow.get("/test/slow", async () => {
+      await new Promise((r) => setTimeout(r, 300));
+      return { ok: true };
+    });
+    slowStats.attach(slow);
+    try {
+      const address = await slow.listen({ port: 0, host: "127.0.0.1" });
+      await fetch(`${address}/test/slow`, { signal: AbortSignal.timeout(50) }).catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 400));
+      slowStats.flush();
+      const tick = readFileSync(path.join(slowDir, "api-stats.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).at(-1);
+      expect(tick.routes["GET /test/slow"]).toMatchObject({ aborted: 1 });
+      expect(tick.routes["GET /test/slow"].statuses).toEqual({});
+    } finally {
+      await slow.close();
+      await slowPool.end();
+      rmSync(slowDir, { recursive: true, force: true });
+    }
   });
 
   it("멈추면 남은 값을 쓰고, 가짜 결제사가 아는 결제를 fake-pay.json에 쓴다", async () => {

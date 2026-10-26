@@ -74,13 +74,15 @@ const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace", "silent"
 
 // 부하 측정에서 바꾸는 손잡이(DESIGN 6.6 "API에 더할 손잡이"). 기본값은 손잡이를 더하기 전과 같다.
 const ServerEnv = z.object({
-  // 풀 크기. 기본은 pg의 10이다. PostgreSQL의 max_connections(기본 100)를 넘지 않게 1~100만 받는다.
+  // 풀 크기. 기본은 pg의 10이다. 1~100만 받는다. 실제로 쓸 수 있는 수는 PostgreSQL의 max_connections(기본 100)에서
+  // 슈퍼유저 몫(기본 3)과 다른 연결(부하 측정의 표본기 등)을 뺀 만큼이다.
   DB_POOL_MAX: z
     .string()
     .regex(/^(?:[1-9]\d?|100)$/, "DB_POOL_MAX는 1~100의 정수여야 합니다")
     .default("10")
     .transform(Number),
-  // 풀에서 연결을 기다리는 시간 한도(ms). 0은 한도 없음(pg의 기본)이다.
+  // 풀에서 연결을 받기까지의 시간 한도(ms). 0은 한도 없음(pg의 기본)이다. 줄에서 기다리는 시간뿐 아니라
+  // 쉬는 연결이 없어 새로 맺는 연결의 TCP·인증 시간에도 걸린다.
   DB_CONNECT_TIMEOUT_MS: z
     .string()
     .regex(/^(?:0|[1-9]\d{0,5})$/, "DB_CONNECT_TIMEOUT_MS는 0~999999의 정수여야 합니다")
