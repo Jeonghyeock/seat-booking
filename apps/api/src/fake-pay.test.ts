@@ -159,6 +159,36 @@ describe("가짜 결제사", () => {
     expect(received).toHaveLength(1 + RETRY_DELAYS_MS.length);
   });
 
+  it("deliveries는 보낸 수, 다시 보내려고 잡은 수, 다섯 번 다시 보내도 받지 않아 버린 수를 센다", async () => {
+    vi.useFakeTimers();
+    const provider = new FakePaymentProvider(SECRET);
+    const attempts = new Map<number, number>();
+    provider.connect(async (webhook) => {
+      const { paymentId } = JSON.parse(webhook.rawBody) as FakePayEvent;
+      const attempt = (attempts.get(paymentId) ?? 0) + 1;
+      attempts.set(paymentId, attempt);
+      return paymentId === 1 || attempt === 1 ? 500 : 200;
+    });
+    provider.useTimers({ warn: vi.fn() });
+    await create(provider, 1, "success", 0);
+    await create(provider, 2, "success", 0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    // 결제 1은 처음과 다시 보낸 다섯 번이 모두 500이라 버린다. 결제 2는 처음 500 뒤 다시 보내 200을 받는다.
+    expect(provider.deliveries).toEqual({ sent: 8, retried: 6, givenUp: 1 });
+  });
+
+  it("listPayments는 결제사가 아는 결제와 결과·환불 여부다", async () => {
+    const { provider } = newProvider();
+    await create(provider, 1, "success");
+    await create(provider, 2, "fail");
+    await provider.void(3);
+    await provider.refund(1);
+    expect(provider.listPayments()).toEqual([
+      { paymentId: 1, outcome: "succeeded", refunded: true },
+      { paymentId: 2, outcome: "failed", refunded: false },
+    ]);
+  });
+
   it("타이머 모드의 early가 실패하면 1초 뒤부터 다시 보낸다(모두 여섯 번)", async () => {
     vi.useFakeTimers();
     const { provider, received } = newProvider(Array(10).fill(500));

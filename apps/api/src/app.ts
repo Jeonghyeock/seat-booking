@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import cookie from "@fastify/cookie";
 import { HealthResponse, HealthUnavailable } from "@seat-booking/shared";
-import Fastify, { type FastifyError, type FastifyServerOptions } from "fastify";
+import Fastify, { type FastifyError, type FastifyRequest, type FastifyServerOptions } from "fastify";
 import { serializerCompiler, validatorCompiler, type ZodTypeProvider } from "fastify-type-provider-zod";
 import type pg from "pg";
 import { createDb } from "./db/client.js";
@@ -17,10 +17,15 @@ import { webhookRoutes } from "./routes/webhooks.js";
 
 // paymentProvider를 넘기지 않으면 무작위 비밀로 새로 만든다. 서명하는 쪽과 확인하는 쪽이 같은 프로세스라 비밀을 밖에서 받을 필요가 없다.
 // auth를 넘기지 않으면 Secure 쿠키(__Host-sid), Origin 허용 목록 없음, 가입·로그인 분당 10회다. 운영에 안전한 기본값이다(DESIGN 6.3 설정).
+// onServerError는 오류 처리기가 5xx로 바꾼 오류를 받는다(부하 측정이 SQLSTATE를 센다, DESIGN 6.6).
 export function buildApp(
   pool: pg.Pool,
   options: FastifyServerOptions = {},
-  services: { paymentProvider?: FakePaymentProvider; auth?: Partial<AuthConfig> } = {},
+  services: {
+    paymentProvider?: FakePaymentProvider;
+    auth?: Partial<AuthConfig>;
+    onServerError?: (request: FastifyRequest, err: unknown) => void;
+  } = {},
 ) {
   // undefined가 넘어와도 Secure가 꺼지지 않게 값마다 기본값을 채운다.
   const authConfig: AuthConfig = {
@@ -47,6 +52,7 @@ export function buildApp(
     const status = err.statusCode ?? 500;
     if (status < 500) return reply.code(status).send({ error: err.message });
     request.log.error({ err }, "처리하지 못한 오류");
+    services.onServerError?.(request, err);
     return reply.code(500).send({ error: "서버 오류" });
   });
 

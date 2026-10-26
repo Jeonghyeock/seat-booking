@@ -265,13 +265,23 @@ export async function runCleanup(db: Db, provider: FakePaymentProvider, log: Log
 
 // 서버를 띄우는 main.ts에서만 켠다(buildApp은 켜지 않는다). 테스트는 함수를 직접 부른다.
 // 앞 번이 끝나지 않았으면 이번은 건너뛴다. 멈추는 함수는 진행 중인 바퀴가 끝날 때까지 기다린다(풀을 닫기 전에 부른다).
-export function startCleanupLoop(db: Db, provider: FakePaymentProvider, log: Logger, intervalMs = 10_000) {
+// onRound는 한 바퀴가 끝날 때마다 처리한 수와 걸린 시간(ms)을 받는다(부하 측정의 지표, DESIGN 6.6).
+export function startCleanupLoop(
+  db: Db,
+  provider: FakePaymentProvider,
+  log: Logger,
+  intervalMs = 10_000,
+  onRound?: (counts: CleanupCounts, ms: number) => void,
+) {
   let current: Promise<unknown> | undefined;
   const timer = setInterval(() => {
     if (current) return;
-    current = runCleanup(db, provider, log).finally(() => {
-      current = undefined;
-    });
+    const started = performance.now();
+    current = runCleanup(db, provider, log)
+      .then((counts) => onRound?.(counts, performance.now() - started))
+      .finally(() => {
+        current = undefined;
+      });
   }, intervalMs);
   timer.unref();
   return async () => {
