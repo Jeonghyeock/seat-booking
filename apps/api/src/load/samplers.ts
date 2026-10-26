@@ -93,7 +93,7 @@ export async function snapshotStats(url: string) {
       `select xact_commit, xact_rollback, deadlocks, temp_files, temp_bytes, blks_hit, blks_read, conflicts
          from pg_stat_database where datname = current_database()`,
     );
-    const checkpointer = await client.query("select num_timed, num_requested, buffers_written from pg_stat_checkpointer");
+    const checkpointer = await client.query("select num_timed, num_requested, num_done, buffers_written from pg_stat_checkpointer");
     return {
       at: new Date().toISOString(),
       tables: tables.rows,

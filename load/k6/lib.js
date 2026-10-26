@@ -42,7 +42,9 @@ export const ERROR_CODES = [
   "none",
 ];
 
+// 본문의 code. 본문을 받지 않았거나(responseType none) JSON이 아니면 none.
 export function errorCode(res) {
+  if (!res.body) return "none";
   try {
     return res.json("code") || "none";
   } catch {
@@ -62,10 +64,13 @@ export function request(method, path, name, { cookie, body, key, discard } = {})
     timeout: "30s",
     responseType: discard ? "none" : "text",
   });
-  if (res.status === 0 || res.status >= 300) {
-    apiErrors.add(1, { name, status: String(res.status), code: discard ? "none" : errorCode(res) });
-  }
+  countError(res, name);
   return res;
+}
+
+// 2xx가 아닌 응답을 센다. http.batch로 보낸 응답도 여기를 거친다.
+export function countError(res, name) {
+  if (res.status === 0 || res.status >= 300) apiErrors.add(1, { name, status: String(res.status), code: errorCode(res) });
 }
 
 // 화면의 재시도 규칙(DESIGN 10장 76): 응답이 없거나 503이거나 409 REQUEST_IN_PROGRESS면

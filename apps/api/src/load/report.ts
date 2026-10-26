@@ -16,7 +16,7 @@ export const readJsonLines = <T>(file: string): T[] =>
 // k6를 --log-format=json으로 띄우면 console.log 한 줄이 {"source":"console","msg":"…"}다. msg가 시나리오가 남긴 JSON이다.
 export type K6Event =
   | { ev: "phase"; name: string; startedAt: number }
-  | { ev: "hold"; user: number; attempt: number; seats: number[]; status: number; code: string | null; at: number }
+  | { ev: "hold"; user: number; attempt: number; seats: number[]; status: number; code: string | null; at: number; answeredAt: number }
   | { ev: "paid"; user: number; orderId: number; seatIds: number[] }
   | { ev: "result"; user: number; orderId: number; result: string }
   | { ev: "gave_up"; user: number; reason: string; attempt: number };
@@ -50,6 +50,7 @@ export function phasesFrom(events: K6Event[], seconds: Record<string, number>): 
 type Tick = {
   type: string;
   at: string;
+  ms?: number;
   pool: { total: number; idle: number; waiting: number; connectWait: { p95: number; max: number; count: number } | null; connectErrors: number; newConnections: number };
   node: { elu: number; cpuPct: number; loopDelayMs: { p50: number; p99: number; max: number }; gcMs: number; heapMb: number };
   routes: Record<string, { count?: number; p50?: number; p95?: number; max?: number; statuses: Record<string, number>; errorCodes?: Record<string, number>; aborted?: number }>;
@@ -59,9 +60,10 @@ type Tick = {
 type CpuLine = { at: string; totalPct: number; postgresPct: number; k6Pct: number; nodePctByPid: Record<string, number> };
 type ActivityLine = { at: string; samples: number; byState: Record<string, number>; byWait: Record<string, number> };
 
-const within = (at: string, phase: Phase) => {
-  const t = Date.parse(at);
-  return t >= phase.start && t < phase.end;
+// 1초 줄의 at은 그 창이 끝난 시각이다. 창 전체가 단계 안에 든 줄만 쓴다(단계 앞뒤의 1초가 섞이지 않게).
+const within = (at: string, phase: Phase, windowMs = 1000) => {
+  const end = Date.parse(at);
+  return end - windowMs >= phase.start && end <= phase.end;
 };
 const mean = (values: number[]) => (values.length ? Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 100) / 100 : null);
 const maxOf = (values: number[]) => (values.length ? Math.max(...values) : null);
@@ -77,8 +79,9 @@ const sumBy = (rows: Record<string, number>[]) => {
 };
 
 // API 1초 줄을 단계로 묶는다. 경로별 서버 p95는 1초 줄마다의 p95의 가운데 값과 최대다(1초 p95를 합쳐 전체 p95를 낼 수는 없다).
+// 그래서 k6 p95와 바로 견주지 않는다. k6 p95가 서버의 1초 p95 최대보다도 훨씬 크면 Fastify에 닿기 전에 기다린 것으로 본다.
 export function summarizeApi(ticks: Tick[], phase: Phase) {
-  const rows = ticks.filter((t) => t.type === "tick" && within(t.at, phase));
+  const rows = ticks.filter((t) => t.type === "tick" && within(t.at, phase, t.ms ?? 1000));
   const routes: Record<string, unknown> = {};
   const names = new Set(rows.flatMap((t) => Object.keys(t.routes)));
   for (const name of names) {
@@ -109,16 +112,41 @@ export function summarizeApi(ticks: Tick[], phase: Phase) {
   };
 }
 
-export function summarizeCpu(lines: CpuLine[], phase: Phase, apiPid: number) {
+// 프로세스 값은 한 코어를 100으로 본 %, 전체(totalPct)는 모든 논리 프로세서를 100으로 본 %다.
+// API의 PID가 표본에 없으면 0이 아니라 null이다.
+export function summarizeCpu(lines: CpuLine[], phase: Phase, apiPid: number, logicalProcessors = 20) {
   const rows = lines.filter((l) => within(l.at, phase));
+  const api = rows.flatMap((l) => {
+    const value = l.nodePctByPid[String(apiPid)];
+    return value === undefined ? [] : [value];
+  });
   return {
+    samples: rows.length,
     totalPctMean: mean(rows.map((l) => l.totalPct)),
-    apiPctMean: mean(rows.map((l) => l.nodePctByPid[String(apiPid)] ?? 0)),
-    apiPctMax: maxOf(rows.map((l) => l.nodePctByPid[String(apiPid)] ?? 0)),
+    apiSamples: api.length,
+    apiPctMean: mean(api),
+    apiPctMax: maxOf(api),
     postgresPctMean: mean(rows.map((l) => l.postgresPct)),
     k6PctMean: mean(rows.map((l) => l.k6Pct)),
     k6PctMax: maxOf(rows.map((l) => l.k6Pct)),
+    // 측정과 상관없는 프로세스가 쓴 CPU(한 코어 = 100).
+    othersPctMean: mean(
+      rows.map((l) => l.totalPct * logicalProcessors - (l.nodePctByPid[String(apiPid)] ?? 0) - l.postgresPct - l.k6Pct),
+    ),
   };
+}
+
+// 단계가 무효인 이유(DESIGN 6.6): 버린 반복, k6가 제 코어를 거의 다 씀, 다른 프로세스가 한 코어 넘게 씀.
+export function phaseProblems(
+  k6: { dropped: number } | null,
+  cpu: { k6PctMax: number | null; othersPctMean: number | null },
+  k6Cores: number,
+) {
+  const problems: string[] = [];
+  if (k6 && k6.dropped > 0) problems.push(`버린 반복 ${k6.dropped}`);
+  if (cpu.k6PctMax !== null && cpu.k6PctMax >= 90 * k6Cores) problems.push(`k6 CPU 최대 ${cpu.k6PctMax}%(코어 ${k6Cores}개)`);
+  if (cpu.othersPctMean !== null && cpu.othersPctMean > 100) problems.push(`다른 프로세스 CPU 평균 ${cpu.othersPctMean}%`);
+  return problems;
 }
 
 export function summarizeActivity(lines: ActivityLine[], phase: Phase) {
@@ -182,23 +210,97 @@ export function diffStats(before: StatsSnapshot, after: StatsSnapshot) {
     tempFiles: db("temp_files"),
     blocksRead: db("blks_read"),
     blocksHit: db("blks_hit"),
-    checkpoints: num(after.checkpointer.num_timed) + num(after.checkpointer.num_requested) - num(before.checkpointer.num_timed) - num(before.checkpointer.num_requested),
+    // PG 17부터 num_timed는 건너뛴(할 일이 없던) 예약 checkpoint도 센다. 실제로 한 것은 num_done이다.
+    checkpoints: num(after.checkpointer.num_done) - num(before.checkpointer.num_done),
   };
 }
 
-// C2 판정(S1 회차). 모두 0이고 살아 있어야 통과다.
-export async function verifyC2(
+// k6 기록에서 선점 응답을 나눈다. 201과 경합의 409(SEAT_UNAVAILABLE·HOLD_LIMIT)만 예상한 결과다.
+// 응답이 없는 것(0, 시간 초과·끊김)은 서버에서 성공했을 수도 있어 실패가 아니라 "알 수 없음"으로 센다.
+export function holdResponses(events: K6Event[]) {
+  let unexpected = 0;
+  let unknown = 0;
+  for (const e of events) {
+    if (e.ev !== "hold") continue;
+    if (e.status === 0) unknown++;
+    else if (e.status === 201) continue;
+    else if (!(e.status === 409 && (e.code === "SEAT_UNAVAILABLE" || e.code === "HOLD_LIMIT"))) unexpected++;
+  }
+  return { unexpected, unknown };
+}
+
+// API 1초 줄의 23505(유효한 표 중복 등 DB 제약), 웹훅 5xx, 그 밖의 5xx.
+export function serverErrors(ticks: Tick[]) {
+  let uniqueViolations = 0;
+  let webhook5xx = 0;
+  let other5xx = 0;
+  for (const tick of ticks) {
+    if (tick.type !== "tick") continue;
+    for (const [name, route] of Object.entries(tick.routes)) {
+      uniqueViolations += route.errorCodes?.["23505"] ?? 0;
+      for (const [status, count] of Object.entries(route.statuses)) {
+        if (Number(status) < 500) continue;
+        if (name === "POST /webhooks/fake-pay") webhook5xx += count;
+        else other5xx += count;
+      }
+    }
+  }
+  return { uniqueViolations, webhook5xx, other5xx };
+}
+
+type C2Parts = {
+  invariants: Record<string, number>;
+  leftovers: Record<string, number>;
+  clientFailures: Record<string, number>;
+  provider: Record<string, number>;
+  server: { uniqueViolations: number; webhook5xx: number; other5xx: number };
+  deadlocks: number;
+  holds: { unexpected: number; unknown: number };
+  liveness: { neverPicked: number; gaveUpNoSeats: number };
+  users: number;
+  outcomes: number;
+  soldDuringRun: number;
+  k6Exit: number | null;
+  apiExit: number | null | "timeout";
+};
+
+// C2 판정. 실패한 이유를 모두 돌려주고, 이유가 없어야 통과다. 아무것도 팔지 않거나 k6·API가 실패해도 통과하지 않게
+// 판매 수, 사용자마다 결과가 있는지, 예상하지 않은 선점 응답, 프로세스 종료 코드를 함께 본다(DB를 쓰지 않아 테스트한다).
+export function judgeC2(parts: C2Parts) {
+  const reasons: string[] = [];
+  const nonZero = (label: string, counts: Record<string, number>) => {
+    for (const [name, count] of Object.entries(counts)) if (count !== 0) reasons.push(`${label} ${name} ${count}`);
+  };
+  nonZero("불변식", parts.invariants);
+  nonZero("남은 일", parts.leftovers);
+  nonZero("클라이언트 대조", parts.clientFailures);
+  nonZero("결제사 대조", parts.provider);
+  nonZero("서버", parts.server);
+  if (parts.deadlocks !== 0) reasons.push(`교착 ${parts.deadlocks}`);
+  if (parts.holds.unexpected !== 0) reasons.push(`예상하지 않은 선점 응답 ${parts.holds.unexpected}`);
+  // (f) 아무도 고르지 않은 빈 좌석(측정 내내 비어 있던 좌석)이 남았는데, 지도에 빈 좌석이 없다며 포기한 사용자가 있으면
+  // 지도가 빈 좌석을 보여 주지 않은 것이다. 네 번 다 다른 사람에게 져서 포기한 것은 경합의 결과라 실패가 아니다.
+  if (parts.liveness.neverPicked > 0 && parts.liveness.gaveUpNoSeats > 0) {
+    reasons.push(`살아 있지 않음: 고르지 않은 빈 좌석 ${parts.liveness.neverPicked}, 좌석이 없다며 포기 ${parts.liveness.gaveUpNoSeats}`);
+  }
+  if (parts.soldDuringRun === 0) reasons.push("측정 중에 팔린 좌석이 없음");
+  if (parts.outcomes !== parts.users) reasons.push(`결과를 남긴 사용자 ${parts.outcomes}/${parts.users}`);
+  if (parts.k6Exit !== 0) reasons.push(`k6 종료 코드 ${parts.k6Exit}`);
+  if (parts.apiExit !== 0) reasons.push(`API 종료 ${parts.apiExit}`);
+  return { passed: reasons.length === 0, reasons };
+}
+
+// C2 판정에 쓸 DB 쪽 값을 모은다(S1 회차).
+export async function collectC2(
   pool: pg.Pool,
   input: {
     performanceId: number;
     userIds: number[];
     events: K6Event[];
     providerPayments: { paymentId: number; outcome: "succeeded" | "failed"; refunded: boolean }[];
-    ticks: Tick[];
-    deadlocks: number;
   },
 ) {
-  const { performanceId, userIds, events, providerPayments, ticks } = input;
+  const { performanceId, userIds, events, providerPayments } = input;
   const invariants = await checkInvariants(pool, [performanceId]);
   const leftovers = await checkLeftovers(pool, [performanceId]);
   const seats = await seatCounts(pool, performanceId);
@@ -206,49 +308,26 @@ export async function verifyC2(
   const clientGaveUp = events.flatMap((e) => (e.ev === "result" && e.result === "pending" ? [e.orderId] : []));
   const client = await compareClientPaid(pool, { performanceId, userIds, clientPaid, clientGaveUp });
   const provider = await compareProvider(pool, { performanceId, userIds, providerPayments });
-  let uniqueViolations = 0;
-  let webhook5xx = 0;
-  for (const tick of ticks) {
-    if (tick.type !== "tick") continue;
-    for (const [name, route] of Object.entries(tick.routes)) {
-      uniqueViolations += route.errorCodes?.["23505"] ?? 0;
-      if (name === "POST /webhooks/fake-pay") {
-        for (const [status, count] of Object.entries(route.statuses)) if (Number(status) >= 500) webhook5xx += count;
-      }
-    }
-  }
-  // (f) 살아 있는지. 아무도 고르지 않은 빈 좌석(측정 내내 비어 있던 좌석)이 남았는데, 지도에 빈 좌석이 없다며 포기한
-  // 사용자가 있으면 실패다(지도가 빈 좌석을 보여 주지 않았다). 네 번 다 다른 사람에게 져서 포기한 것은 경합의 결과라 따로 센다.
   const { rows } = await pool.query<{ seat_id: number }>(
     "select seat_id from performance_seats where performance_id = $1 and status = 'available'",
     [performanceId],
   );
   const picked = new Set(events.flatMap((e) => (e.ev === "hold" ? e.seats : [])));
-  const neverPicked = rows.filter((r) => !picked.has(Number(r.seat_id))).length;
-  const gaveUpNoSeats = events.filter((e) => e.ev === "gave_up" && e.reason === "no_seats").length;
-  const gaveUpAfterAttempts = events.filter((e) => e.ev === "gave_up" && e.reason === "attempts").length;
-  const live = !(neverPicked > 0 && gaveUpNoSeats > 0);
-  const zero = (counts: Record<string, number>) => Object.values(counts).every((v) => v === 0);
-  const passed =
-    zero(invariants) &&
-    zero(leftovers) &&
-    zero(client.failures) &&
-    zero(provider) &&
-    uniqueViolations === 0 &&
-    webhook5xx === 0 &&
-    input.deadlocks === 0 &&
-    live;
+  const gaveUp = (reason: string) => events.filter((e) => e.ev === "gave_up" && e.reason === reason).length;
   return {
-    passed,
     invariants,
     leftovers,
     seats,
     client,
     provider,
-    uniqueViolations,
-    webhook5xx,
-    deadlocks: input.deadlocks,
-    liveness: { available: rows.length, neverPicked, gaveUpNoSeats, gaveUpAfterAttempts, live },
+    liveness: {
+      available: rows.length,
+      neverPicked: rows.filter((r) => !picked.has(Number(r.seat_id))).length,
+      gaveUpNoSeats: gaveUp("no_seats"),
+      gaveUpAfterAttempts: gaveUp("attempts"),
+      gaveUpMapFailed: gaveUp("map_failed"),
+      gaveUpRejected: gaveUp("hold_rejected"),
+    },
     paidByClient: clientPaid.length,
   };
 }
