@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { PerformanceList, SeatMap } from "@seat-booking/shared";
 import { and, asc, eq, sql } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
 import { buildApp } from "../app.js";
 import { createDb } from "../db/client.js";
 import { createPool } from "../db/pool.js";
 import { performanceGrades, performanceSeats, performances, seats } from "../db/schema.js";
 import { readSeedFile, SAMPLE_SEED, seed } from "../db/seed.js";
-import { performanceSummaries, toSummary } from "./performances.js";
+import { performanceSummaries, seatMapSql, toSummary } from "./performances.js";
 
 describe("공연 목록과 좌석 지도 API", () => {
   const pool = createPool({ connectionString: inject("databaseUrl") });
@@ -72,8 +73,17 @@ describe("공연 목록과 좌석 지도 API", () => {
 
   it("DB가 만든 좌석 지도 JSON은 행을 받아 만들던 것과 같다(빈 좌석, 만료 전·후 선점, 팔린 좌석, 가격 없음)", async () => {
     const [, , third] = performanceIds;
-    const db = createDb(pool);
+    // 세션 시간대를 UTC도 정각 단위도 아닌 곳으로 둔다. 시각을 UTC로 바꾸는 것이 빠지면 서버 시간대에 따라 달라지는데,
+    // CI의 postgres는 UTC라 그대로는 잡히지 않는다(리뷰 실험).
+    const tzPool = createPool({ connectionString: inject("databaseUrl"), options: "-c TimeZone=Asia/Kathmandu" });
+    const tzApp = buildApp(tzPool);
+    const db = createDb(tzPool);
     await pool.query("delete from performance_grades where performance_id = $1 and grade = 'R'", [third]);
+    // 앞 좌석 행을 새 버전으로 만들어 표에서의 물리 순서를 섞는다. 정렬이 빠지면 좌석 순서가 달라진다.
+    await pool.query(
+      "update seats set grade = grade where id in (select seat_id from performance_seats where performance_id = $1 order by seat_id limit 3)",
+      [third],
+    );
     const [user] = (await pool.query<{ id: number }>("insert into users (email) values ($1) returning id", [`${randomUUID()}@test.local`])).rows;
     const seatsOf = (
       await pool.query<{ seat_id: number }>("select seat_id from performance_seats where performance_id = $1 order by seat_id limit 3", [third])
@@ -120,14 +130,86 @@ describe("공연 목록과 좌석 지도 API", () => {
       .where(eq(performanceSeats.performanceId, third!))
       .orderBy(asc(seats.id));
 
-    const res = await app.inject({ method: "GET", url: `/performances/${third}/seats` });
-    expect(res.headers["content-type"]).toBe("application/json; charset=utf-8");
-    const { serverTime, ...body } = SeatMap.parse(res.json());
-    expect(body).toEqual({ performance: toSummary(summary!), seats: seatRows });
-    expect(body.seats.slice(0, 3).map((s) => s.status)).toEqual(["held", "available", "sold"]);
-    expect(body.seats.some((s) => s.price === null)).toBe(true);
-    // 서버 시각도 toISOString과 같은 모양이다.
-    expect(serverTime).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
-    expect(Math.abs(Date.parse(serverTime) - Date.now())).toBeLessThan(60_000);
+    try {
+      const res = await tzApp.inject({ method: "GET", url: `/performances/${third}/seats` });
+      expect(res.headers["content-type"]).toBe("application/json; charset=utf-8");
+      // 원본 본문을 그대로 비교한다. 예전에는 zod 직렬화기가 스키마에 없는 키를 걸렀지만 이제는 DB가 만든 글자를 그대로 보내므로,
+      // 키가 하나 더 나가도 여기서 잡혀야 한다(SeatMap.parse를 먼저 하면 모르는 키가 지워져 못 잡는다).
+      expect(res.json()).toEqual({
+        performance: toSummary(summary!),
+        seats: seatRows,
+        serverTime: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
+      });
+      const body = SeatMap.parse(res.json());
+      expect(body.seats.slice(0, 3).map((s) => s.status)).toEqual(["held", "available", "sold"]);
+      expect(body.seats.some((s) => s.price === null)).toBe(true);
+      expect(Math.abs(Date.parse(body.serverTime) - Date.now())).toBeLessThan(60_000);
+    } finally {
+      await tzApp.close();
+      await tzPool.end();
+    }
+  });
+
+  it("선점 만료가 지금과 같은 순간이면 아직 선점이다(선점할 때와 같은 조건)", async () => {
+    // 되돌리는 트랜잭션이라 다른 테스트의 회차를 써도 남는 것이 없다.
+    const [first] = performanceIds;
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const [user] = (await client.query<{ id: number }>("insert into users (email) values ($1) returning id", [`${randomUUID()}@test.local`])).rows;
+      // now()는 트랜잭션의 시작 시각이라, 같은 트랜잭션에서 만료를 now()로 두면 지도의 now()와 같다.
+      const hold = (
+        await client.query<{ id: number }>("insert into holds (user_id, performance_id, expires_at) values ($1, $2, now()) returning id", [
+          user!.id,
+          first,
+        ])
+      ).rows[0]!;
+      await client.query(
+        `update performance_seats set status = 'held', hold_id = $2, hold_expires_at = now()
+          where performance_id = $1 and seat_id = (select min(seat_id) from performance_seats where performance_id = $1)`,
+        [first, hold.id],
+      );
+      const query = new PgDialect().sqlToQuery(seatMapSql(first!));
+      const { rows } = await client.query<{ body: string }>(query.sql, query.params);
+      expect(SeatMap.parse(JSON.parse(rows[0]!.body)).seats[0]!.status).toBe("held");
+    } finally {
+      await client.query("rollback");
+      client.release();
+    }
+  });
+
+  it("좌석은 표에 놓인 순서와 상관없이 좌석 id 순서다", async () => {
+    const [first] = performanceIds;
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      // 앞 좌석 행 셋을 새 버전으로 만들어 표의 끝으로 보내고, 인덱스를 쓰지 않게 해 표에 놓인 순서대로 읽게 한다.
+      await client.query(
+        `update performance_seats set status = status
+          where performance_id = $1 and seat_id in (select seat_id from performance_seats where performance_id = $1 order by seat_id limit 3)`,
+        [first],
+      );
+      await client.query("set local enable_indexscan = off; set local enable_bitmapscan = off; set local enable_indexonlyscan = off");
+      const query = new PgDialect().sqlToQuery(seatMapSql(first!));
+      const { rows } = await client.query<{ body: string }>(query.sql, query.params);
+      const ids = SeatMap.parse(JSON.parse(rows[0]!.body)).seats.map((s) => s.seatId);
+      expect(ids).toEqual([...ids].sort((a, b) => a - b));
+    } finally {
+      await client.query("rollback");
+      client.release();
+    }
+  });
+
+  it("좌석이 없는 회차는 빈 배열이다", async () => {
+    const { rows } = await pool.query<{ id: number }>(
+      `insert into performances (show_id, venue_id, starts_at, sales_open_at, sales_close_at)
+       select show_id, venue_id, starts_at + interval '777 days', sales_open_at, sales_close_at + interval '777 days'
+         from performances where id = $1
+       returning id`,
+      [performanceIds[0]],
+    );
+    const res = await app.inject({ method: "GET", url: `/performances/${rows[0]!.id}/seats` });
+    expect(res.statusCode).toBe(200);
+    expect(SeatMap.parse(res.json()).seats).toEqual([]);
   });
 });

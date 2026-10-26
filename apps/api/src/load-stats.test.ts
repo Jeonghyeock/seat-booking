@@ -95,6 +95,9 @@ describe("부하 측정 지표(LOAD_STATS)", () => {
     expect(idle.elu).toBeLessThan(0.5);
     expect(idle.cpuPct).toBeLessThan(50);
     expect(idle.loopDelayMs.max).toBeLessThan(150);
+    // 1초 줄도 표본 간격을 뺀 값을 쓰는지 본다. 빼지 않으면 쉬어도 10 이상이다. 다른 테스트 파일이 CPU를 쓰면 6ms대까지 올라
+    // 5로는 흔들렸다(전체 실행 8번 중 2번).
+    expect(idle.loopDelayMs.p50).toBeLessThan(10);
     for (const value of [idle.gcMs, idle.gcCount]) expect(value).toBeGreaterThanOrEqual(0);
     expect(idle.heapMb).toBeGreaterThan(0);
   });
