@@ -216,7 +216,7 @@ describe("C2 판정", () => {
     leftovers: { heldSeats: 0 },
     clientFailures: { dbOnly: 0 },
     provider: { unknownToDb: 0 },
-    server: { uniqueViolations: 0, webhook5xx: 0, other5xx: 0 },
+    server: { uniqueViolations: 0, webhook5xx: 0, unexpected5xx: 0, retryable503: 0 },
     deadlocks: 0,
     holds: { unexpected: 0, unknown: 0 },
     liveness: { neverPicked: 0, gaveUpNoSeats: 0 },
@@ -248,7 +248,8 @@ describe("C2 판정", () => {
       tick(2000, { routes: { "POST /performances/:id/holds": { statuses: { 201: 5, 500: 2, 503: 1 }, errorCodes: { "23505": 1 } } } }),
       { type: "start", at: at(0) },
     ];
-    expect(serverErrors(ticks as never)).toEqual({ uniqueViolations: 1, webhook5xx: 1, other5xx: 3 });
+    // 503은 다시 보내라는 응답이라 따로 센다.
+    expect(serverErrors(ticks as never)).toEqual({ uniqueViolations: 1, webhook5xx: 1, unexpected5xx: 2, retryable503: 1 });
   });
 
   it("모두 0이고 팔렸고 사용자마다 결과가 있고 k6·API가 정상으로 끝나야 통과다", () => {
@@ -269,7 +270,11 @@ describe("C2 판정", () => {
     expect(judgeC2({ ...clean, leftovers: { heldSeats: 2 } }).reasons).toEqual(["남은 일 heldSeats 2"]);
     expect(judgeC2({ ...clean, clientFailures: { dbOnly: 1 } }).reasons).toEqual(["클라이언트 대조 dbOnly 1"]);
     expect(judgeC2({ ...clean, provider: { unknownToDb: 1 } }).reasons).toEqual(["결제사 대조 unknownToDb 1"]);
-    expect(judgeC2({ ...clean, server: { uniqueViolations: 0, webhook5xx: 0, other5xx: 4 } }).reasons).toEqual(["서버 other5xx 4"]);
+    expect(judgeC2({ ...clean, server: { uniqueViolations: 0, webhook5xx: 0, unexpected5xx: 4, retryable503: 0 } }).reasons).toEqual([
+      "서버 unexpected5xx 4",
+    ]);
+    // 결제사 호출 시간 초과의 503(Retry-After)은 설계한 응답이라 실패가 아니다.
+    expect(judgeC2({ ...clean, server: { uniqueViolations: 0, webhook5xx: 0, unexpected5xx: 0, retryable503: 7 } }).passed).toBe(true);
     expect(judgeC2({ ...clean, deadlocks: 1 }).reasons).toEqual(["교착 1"]);
   });
 
