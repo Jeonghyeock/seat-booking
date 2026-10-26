@@ -136,16 +136,20 @@ export function summarizeCpu(lines: CpuLine[], phase: Phase, apiPid: number, log
   };
 }
 
-// 단계가 무효인 이유(DESIGN 6.6): 버린 반복, k6가 제 코어를 거의 다 씀, 다른 프로세스가 한 코어 넘게 씀.
+// 단계가 무효인 이유(DESIGN 6.6): 버린 반복, k6가 제 코어를 거의 다 씀, 다른 프로세스가 측정 전보다 한 코어 넘게 더 씀.
+// 이 PC는 쉴 때도 다른 프로세스가 CPU를 쓰므로, k6를 띄우기 전에 잰 값(othersBaseline)을 기준으로 본다.
 export function phaseProblems(
   k6: { dropped: number } | null,
   cpu: { k6PctMax: number | null; othersPctMean: number | null },
   k6Cores: number,
+  othersBaseline: number,
 ) {
   const problems: string[] = [];
   if (k6 && k6.dropped > 0) problems.push(`버린 반복 ${k6.dropped}`);
   if (cpu.k6PctMax !== null && cpu.k6PctMax >= 90 * k6Cores) problems.push(`k6 CPU 최대 ${cpu.k6PctMax}%(코어 ${k6Cores}개)`);
-  if (cpu.othersPctMean !== null && cpu.othersPctMean > 100) problems.push(`다른 프로세스 CPU 평균 ${cpu.othersPctMean}%`);
+  if (cpu.othersPctMean !== null && cpu.othersPctMean > othersBaseline + 100) {
+    problems.push(`다른 프로세스 CPU 평균 ${cpu.othersPctMean}%(측정 전 ${othersBaseline}%)`);
+  }
   return problems;
 }
 

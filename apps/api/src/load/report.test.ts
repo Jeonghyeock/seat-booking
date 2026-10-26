@@ -132,13 +132,13 @@ describe("부하 측정 요약", () => {
     });
   });
 
-  it("단계의 무효 이유: 버린 반복, k6가 제 코어를 거의 다 씀, 다른 프로세스가 한 코어를 넘게 씀", () => {
-    expect(phaseProblems({ dropped: 0 }, { k6PctMax: 100, othersPctMean: 50 }, 8)).toEqual([]);
-    expect(phaseProblems(null, { k6PctMax: null, othersPctMean: null }, 8)).toEqual([]);
-    expect(phaseProblems({ dropped: 3 }, { k6PctMax: 720, othersPctMean: 150 }, 8)).toEqual([
+  it("단계의 무효 이유: 버린 반복, k6가 제 코어를 거의 다 씀, 다른 프로세스가 측정 전보다 한 코어를 넘게 더 씀", () => {
+    expect(phaseProblems({ dropped: 0 }, { k6PctMax: 100, othersPctMean: 250 }, 8, 200)).toEqual([]);
+    expect(phaseProblems(null, { k6PctMax: null, othersPctMean: null }, 8, 200)).toEqual([]);
+    expect(phaseProblems({ dropped: 3 }, { k6PctMax: 720, othersPctMean: 301 }, 8, 200)).toEqual([
       "버린 반복 3",
       "k6 CPU 최대 720%(코어 8개)",
-      "다른 프로세스 CPU 평균 150%",
+      "다른 프로세스 CPU 평균 301%(측정 전 200%)",
     ]);
   });
 

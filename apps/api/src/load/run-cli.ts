@@ -156,6 +156,7 @@ let t0: Date | null = null;
 let k6EndedAt = Date.now();
 let before: StatsSnapshot | null = null;
 let after: StatsSnapshot | null = null;
+let baseline: Phase | null = null;
 
 try {
   const loadUrl = await cloneLoadDatabase(baseUrl);
@@ -210,6 +211,9 @@ try {
       env: osEnv(),
     }),
   );
+  // k6를 띄우기 전 6초: 다른 프로세스가 쉴 때 쓰는 CPU의 기준선(표본기가 뜨는 1초를 뺀다).
+  baseline = { name: "baseline", start: Date.now() + 1000, end: Date.now() + 6000 };
+  await sleep(6500);
   before = await snapshotStats(loadUrl);
 
   // 시나리오에 주는 값은 -e로 넘긴다(k6의 __ENV). Go 런타임이 E코어 수만큼만 스레드를 돌리게 GOMAXPROCS를 준다.
@@ -304,6 +308,7 @@ const ticks = readJsonLines<Parameters<typeof summarizeApi>[0][number]>(path.joi
 const cpu = readJsonLines<Parameters<typeof summarizeCpu>[0][number]>(path.join(runDir, "cpu.jsonl"));
 const dbActivity = readJsonLines<Parameters<typeof summarizeActivity>[0][number]>(path.join(runDir, "db-activity.jsonl"));
 const stats = before && after ? diffStats(before, after) : null;
+const othersBaseline = baseline ? (summarizeCpu(cpu, baseline, api?.pid ?? -1, masks?.logical ?? 20).othersPctMean ?? 0) : 0;
 const byPhase = phases.map((phase) => {
   const k6 = k6Summary && phase.name !== "s1_burst" ? summarizeK6(k6Summary, phase.name) : null;
   const cpuSummary = summarizeCpu(cpu, phase, api?.pid ?? -1, masks?.logical ?? 20);
@@ -313,7 +318,7 @@ const byPhase = phases.map((phase) => {
     api: summarizeApi(ticks, phase),
     cpu: cpuSummary,
     db: summarizeActivity(dbActivity, phase),
-    problems: phaseProblems(k6, cpuSummary, masks?.efficient.length ?? 20),
+    problems: phaseProblems(k6, cpuSummary, masks?.efficient.length ?? 20, othersBaseline),
   };
 });
 
@@ -375,13 +380,14 @@ if (t0 && pool && !report.error) {
 }
 await pool?.end();
 
-Object.assign(report, { k6Exit: k6Code, apiExit: apiCode, apiPid: api?.pid, stats, phases: byPhase, s1, c2 });
+Object.assign(report, { k6Exit: k6Code, apiExit: apiCode, apiPid: api?.pid, othersCpuBaseline: othersBaseline, stats, phases: byPhase, s1, c2 });
 writeFileSync(path.join(runDir, "run.json"), JSON.stringify(report, null, 1));
 
 const lines = [
   `# ${args.label} (${started.toISOString()})`,
   "",
-  `풀 ${args.pool}, k6 종료 ${k6Code}, API 종료 ${apiCode}, checkpoint ${stats?.checkpoints ?? "-"}, 교착 ${stats?.deadlocks ?? "-"}`,
+  `풀 ${args.pool}, k6 종료 ${k6Code}, API 종료 ${apiCode}, checkpoint ${stats?.checkpoints ?? "-"}, 교착 ${stats?.deadlocks ?? "-"}, ` +
+    `측정 전 다른 프로세스 CPU ${othersBaseline}%(한 코어 = 100)`,
 ];
 if (report.error) lines.push("", `실패: ${report.error}`);
 lines.push("");
