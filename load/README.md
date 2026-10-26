@@ -26,7 +26,7 @@
 | 옵션 | 뜻 |
 |---|---|
 | `--label` | 결과 폴더 이름 |
-| `--pool`, `--connect-timeout` | `DB_POOL_MAX`, `DB_CONNECT_TIMEOUT_MS` |
+| `--pool`, `--connect-timeout` | `DB_POOL_MAX`, `DB_CONNECT_TIMEOUT_MS`. 주지 않으면 API 기본값(풀 10, 한도 없음) |
 | `--s2-rates 100,200,300 --s2-step 60` | S2 좌석 지도 도착률(초당). 여러 개면 단계로 올립니다 |
 | `--s2-warmup 30` | 첫 도착률로 먼저 도는 예열(초). 요약에서 따로 나옵니다 |
 | `--s3-rates`, `--s3-step`, `--s3-warmup` | S3 지속 부하(선점 → 주문 → 결제 또는 취소) |
