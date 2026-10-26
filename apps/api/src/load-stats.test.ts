@@ -7,7 +7,7 @@ import { buildApp } from "./app.js";
 import { createDb } from "./db/client.js";
 import { createPool } from "./db/pool.js";
 import { FakePaymentProvider } from "./fake-pay.js";
-import { createLoadStats, errorCode } from "./load-stats.js";
+import { createLoadStats, errorCode, loopDelayMs } from "./load-stats.js";
 
 describe("부하 측정 지표(LOAD_STATS)", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "load-stats-"));
@@ -86,16 +86,15 @@ describe("부하 측정 지표(LOAD_STATS)", () => {
       if (busy.loopDelayMs.max >= 150) break;
     }
     expect(busy.elu).toBeGreaterThan(0.5);
-    expect(busy.cpuPct).toBeGreaterThan(50);
+    // 다른 테스트 파일이 CPU를 쓰면 바쁘게 돈 시간에도 CPU를 덜 받는다(전체 실행에서 47%). 누적 값이면 200을 크게 넘는다.
+    expect(busy.cpuPct).toBeGreaterThan(10);
     expect(busy.cpuPct).toBeLessThan(200);
     expect(busy.loopDelayMs.max).toBeGreaterThanOrEqual(150);
     await new Promise((r) => setTimeout(r, 100));
     const idle = lastLine().node;
     expect(idle.elu).toBeLessThan(0.5);
     expect(idle.cpuPct).toBeLessThan(50);
-    // 표본 간격(10ms)을 뺀 값이라 쉬면 0에 가깝다.
     expect(idle.loopDelayMs.max).toBeLessThan(150);
-    expect(idle.loopDelayMs.p50).toBeLessThan(5);
     for (const value of [idle.gcMs, idle.gcCount]) expect(value).toBeGreaterThanOrEqual(0);
     expect(idle.heapMb).toBeGreaterThan(0);
   });
@@ -179,6 +178,13 @@ describe("부하 측정 지표(LOAD_STATS)", () => {
       { paymentId: 2_000_000_001, outcome: "succeeded", refunded: true },
       { paymentId: 2_000_000_002, outcome: "failed", refunded: false },
     ]);
+  });
+
+  // 쉬는 줄의 지연으로 보면 다른 테스트 파일이 CPU를 쓸 때 흔들려(전체 실행 8번 중 2번 실패) 변환 함수로 본다.
+  it("이벤트 루프 지연은 표본 간격(10ms)을 뺀 밀리초이고 0 아래로 내려가지 않는다", () => {
+    expect(loopDelayMs(10_400_000)).toBe(0.4);
+    expect(loopDelayMs(25_000_000)).toBe(15);
+    expect(loopDelayMs(9_000_000)).toBe(0);
   });
 
   it("오류 코드는 cause를 따라가 처음 나온 code이고, 없으면 '없음'이다", () => {

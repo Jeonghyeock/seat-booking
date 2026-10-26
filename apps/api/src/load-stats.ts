@@ -44,7 +44,7 @@ export function errorCode(err: unknown): string {
 // 타이머·I/O 콜백(요청 처리) 안에서 막힌 것은 잡히지만, setImmediate 뒤에 막힌 것은 잡히지 않았다(실험).
 // 그래서 포화는 이벤트 루프 사용률(ELU)과 함께 본다.
 const LOOP_DELAY_RESOLUTION_MS = 10;
-const loopDelayMs = (ns: number) => round(Math.max(0, ns / 1e6 - LOOP_DELAY_RESOLUTION_MS));
+export const loopDelayMs = (ns: number) => round(Math.max(0, ns / 1e6 - LOOP_DELAY_RESOLUTION_MS));
 
 const routeKey = (request: FastifyRequest) => `${request.method} ${request.routeOptions.url ?? "(없는 경로)"}`;
 
