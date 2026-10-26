@@ -63,10 +63,12 @@ const shutdown = () => {
 };
 for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, shutdown);
 // 부하 실행기가 IPC 채널로 띄운 경우에만 켠다(DESIGN 6.6). Windows에는 SIGTERM이 없어, 실행기가 이 메시지로 앱을 닫는다.
+// 실행기가 죽어 채널이 끊겨도 닫는다. Windows에서는 부모가 끝나도 자식이 남아 다음 측정의 포트와 DB를 막는다.
 if (process.send) {
   process.on("message", (message) => {
     if (message === "shutdown") shutdown();
   });
+  process.once("disconnect", shutdown);
 }
 
 await app.listen({ port, host });

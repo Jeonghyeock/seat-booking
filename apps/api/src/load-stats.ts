@@ -12,7 +12,7 @@ import type { FakePaymentProvider } from "./fake-pay.js";
 // 끝난 줄은 남는다(Windows의 TerminateProcess는 onClose를 돌리지 않는다). 그래서 끝에 한 번 쓰는 값에 기대지 않는다.
 // 앱을 닫으면(stop) 남은 값을 쓰고, 가짜 결제사가 아는 결제를 fake-pay.json에 쓴다(합격 확인 (e)).
 
-type RouteWindow = { times: number[]; statuses: Record<number, number>; errorCodes: Record<string, number> };
+type RouteWindow = { times: number[]; statuses: Record<number, number>; errorCodes: Record<string, number>; aborted: number };
 type ConnectCallback = (err: Error | undefined, client: pg.PoolClient | undefined, release: (release?: unknown) => void) => void;
 
 const round = (value: number) => Math.round(value * 100) / 100;
@@ -25,16 +25,26 @@ function summarize(values: number[]) {
   return { count: sorted.length, p50: round(at(50)), p95: round(at(95)), max: round(sorted.at(-1)!) };
 }
 
+// pg-pool이 연결을 주지 못할 때 던지는 오류에는 code가 없다. 연결 대기 한도(DB_CONNECT_TIMEOUT_MS)에 걸린 것을 따로 센다.
+const POOL_TIMEOUT_MESSAGES = ["timeout exceeded when trying to connect", "Connection terminated due to connection timeout"];
+
 // 오류의 code(pg 오류면 SQLSTATE). Drizzle은 pg 오류를 cause에 싸서 던지므로 cause를 따라가며 처음 나온 것을 쓴다.
 export function errorCode(err: unknown): string {
   let current = err;
   for (let depth = 0; depth < 5 && current !== null && typeof current === "object"; depth++) {
-    const { code, cause } = current as { code?: unknown; cause?: unknown };
+    const { code, cause, message } = current as { code?: unknown; cause?: unknown; message?: unknown };
     if (typeof code === "string") return code;
+    if (typeof message === "string" && POOL_TIMEOUT_MESSAGES.includes(message)) return "POOL_TIMEOUT";
     current = cause;
   }
   return "없음";
 }
+
+// monitorEventLoopDelay는 타이머가 울린 간격 전체를 적는다. 쉬어도 값이 이 간격만큼 나오므로 빼서 쓴다.
+// 타이머·I/O 콜백(요청 처리) 안에서 막힌 것은 잡히지만, setImmediate 뒤에 막힌 것은 잡히지 않았다(실험).
+// 그래서 포화는 이벤트 루프 사용률(ELU)과 함께 본다.
+const LOOP_DELAY_RESOLUTION_MS = 10;
+const loopDelayMs = (ns: number) => round(Math.max(0, ns / 1e6 - LOOP_DELAY_RESOLUTION_MS));
 
 const routeKey = (request: FastifyRequest) => `${request.method} ${request.routeOptions.url ?? "(없는 경로)"}`;
 
@@ -52,17 +62,22 @@ export function createLoadStats(options: {
   let routes = new Map<string, RouteWindow>();
   let connectWaits: number[] = [];
   let connectErrors = 0;
+  let newConnections = 0;
   let cleanupRounds: (CleanupCounts & { ms: number })[] = [];
   let gcMs = 0;
   let gcCount = 0;
   const routeWindow = (key: string) => {
     let window = routes.get(key);
     if (!window) {
-      window = { times: [], statuses: {}, errorCodes: {} };
+      window = { times: [], statuses: {}, errorCodes: {}, aborted: 0 };
       routes.set(key, window);
     }
     return window;
   };
+  // 쉬는 연결이 없어 새로 맺은 연결. 그 TCP·인증 시간도 연결 대기 시간에 들어가므로 함께 적는다.
+  pool.on("connect", () => {
+    newConnections++;
+  });
 
   // 풀에서 연결을 받기까지 기다린 시간. 기다리는 연결 수(waitingCount)는 그 순간의 줄 길이일 뿐이라 따로 잰다.
   // pg-pool의 query도 안에서 this.connect를 부르므로, 이 하나로 트랜잭션(Drizzle)과 단일 질의를 모두 잰다.
@@ -106,7 +121,7 @@ export function createLoadStats(options: {
   let lastDeliveries = { ...provider.deliveries };
   let timer: NodeJS.Timeout | undefined;
 
-  // 지난 줄 뒤의 값을 한 줄로 쓰고 비운다.
+  // 지난 줄 뒤의 값을 한 줄로 쓰고 비운다. 누적 값(CPU, ELU, 웹훅 수)은 지난 줄과의 차이를 쓴다.
   function flush() {
     const now = performance.now();
     const elapsedMs = now - lastAt;
@@ -123,15 +138,16 @@ export function createLoadStats(options: {
         waiting: pool.waitingCount,
         connectWait: summarize(connectWaits),
         connectErrors,
+        newConnections,
       },
       node: {
         elu: Math.round(elu.utilization * 1000) / 1000,
         // 한 코어를 100으로 본 CPU 사용률(사용자 + 시스템).
         cpuPct: round(((cpu.user + cpu.system) / 1000 / elapsedMs) * 100),
         loopDelayMs: {
-          p50: round(loopDelay.percentile(50) / 1e6),
-          p99: round(loopDelay.percentile(99) / 1e6),
-          max: round(loopDelay.max / 1e6),
+          p50: loopDelayMs(loopDelay.percentile(50)),
+          p99: loopDelayMs(loopDelay.percentile(99)),
+          max: loopDelayMs(loopDelay.max),
         },
         gcMs: round(gcMs),
         gcCount,
@@ -144,6 +160,7 @@ export function createLoadStats(options: {
             ...summarize(window.times),
             statuses: window.statuses,
             ...(Object.keys(window.errorCodes).length > 0 ? { errorCodes: window.errorCodes } : {}),
+            ...(window.aborted > 0 ? { aborted: window.aborted } : {}),
           },
         ]),
       ),
@@ -163,6 +180,7 @@ export function createLoadStats(options: {
     routes = new Map();
     connectWaits = [];
     connectErrors = 0;
+    newConnections = 0;
     cleanupRounds = [];
     gcMs = 0;
     gcCount = 0;
@@ -181,11 +199,17 @@ export function createLoadStats(options: {
       cleanupRounds.push({ ...counts, ms: round(ms) });
     },
     // 앱이 준비되기 전에 부른다. 웹훅도 app.inject로 같은 훅을 지나 여기 잡힌다.
+    // 클라이언트가 응답 전에 끊은 요청(k6의 시간 한도)은 onResponse가 불리지 않으므로 aborted로 따로 센다.
+    // 가장 느린 요청이 처리 시간에서 빠지므로, aborted가 있으면 그 경로의 p95는 실제보다 작다.
     attach(app: FastifyInstance) {
       app.addHook("onResponse", (request, reply, done) => {
         const window = routeWindow(routeKey(request));
         window.times.push(reply.elapsedTime);
         window.statuses[reply.statusCode] = (window.statuses[reply.statusCode] ?? 0) + 1;
+        done();
+      });
+      app.addHook("onRequestAbort", (request, done) => {
+        routeWindow(routeKey(request)).aborted++;
         done();
       });
     },
