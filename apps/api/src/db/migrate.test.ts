@@ -5,32 +5,37 @@ import { fileURLToPath } from "node:url";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
-import { afterAll, describe, expect, inject, it } from "vitest";
+import { afterAll, describe, expect, inject, it, onTestFinished, vi } from "vitest";
 import { dropDatabase, withAdminClient, withDatabase } from "./databases.js";
 import { NO_TRANSACTION_MARKER, readMigrations, runMigrations } from "./migrate.js";
 
 const repoFolder = fileURLToPath(new URL("../../drizzle", import.meta.url));
 const baseUrl = inject("databaseUrl");
-const databases: string[] = [];
 const folders: string[] = [];
+let created = 0;
 
-// DB 열두 개를 지운다. 지울 때마다 checkpoint가 돌고 autovacuum이 끝나길 기다리기도 해 기본 10초로는 모자랄 수 있다.
-afterAll(async () => {
-  await withAdminClient(baseUrl, async (client) => {
-    for (const db of databases) await dropDatabase(client, db);
-  });
+afterAll(() => {
   for (const dir of folders) rmSync(dir, { recursive: true, force: true });
-}, 60_000);
+});
 
-// 테스트마다 빈 DB를 따로 만든다(마이그레이션은 DB 전체를 바꾼다).
+// 테스트마다 빈 DB를 따로 만들고(마이그레이션은 DB 전체를 바꾼다), 그 테스트가 끝나면 실패해도 지운다.
 async function freshDatabase() {
-  const name = `seat_booking_mig_${process.pid}_${databases.length + 1}`;
+  const name = `seat_booking_mig_${process.pid}_${++created}`;
   await withAdminClient(baseUrl, async (client) => {
-    await client.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+    await dropDatabase(client, name);
     await client.query(`CREATE DATABASE ${name}`);
   });
-  databases.push(name);
+  onTestFinished(() => withAdminClient(baseUrl, (client) => dropDatabase(client, name)));
   return withDatabase(baseUrl, name);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+async function waitUntil(check: () => Promise<boolean>) {
+  for (let i = 0; i < 100; i++) {
+    if (await check()) return;
+    await sleep(50);
+  }
+  throw new Error("기다리던 상태가 되지 않았습니다");
 }
 
 type File = { tag: string; when: number; sql: string };
@@ -133,14 +138,45 @@ describe("마이그레이션 실행기", () => {
       expect(Date.now() - started).toBeLessThan(6_000);
       expect(await records(url)).toHaveLength(1);
 
-      // 첫 시도가 1초에 멈춘 뒤, 쉬는 동안 놓아 준다
-      const run = runMigrations(url, { folder, retryDelaysMs: [1_500] });
-      await new Promise((r) => setTimeout(r, 1_300));
-      await holder.query("commit");
-      expect(await run).toEqual(["0001_add"]);
+      // 첫 시도가 1초에 멈추면 경고를 내고 쉰다. 그 경고 때 놓아 주면, 다시 한 시도가 된다.
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {
+        void holder.query("commit");
+      });
+      try {
+        expect(await runMigrations(url, { folder, retryDelaysMs: [200] })).toEqual(["0001_add"]);
+        expect(warn).toHaveBeenCalledTimes(1);
+      } finally {
+        warn.mockRestore();
+      }
     } finally {
       await holder.end();
     }
+  });
+
+  it("연결이 끊기면 프로세스를 죽이지 않고 그 오류로 실패한다", { timeout: 20_000 }, async () => {
+    const url = await freshDatabase();
+    await runMigrations(url, { folder: folderWith([table]) });
+    const folder = folderWith([table, { tag: "0001_add", when: 200, sql: "alter table t add column w int" }]);
+
+    const holder = await connect(url);
+    try {
+      await holder.query("begin");
+      await holder.query("select * from t");
+      const run = runMigrations(url, { folder, retryDelaysMs: [10, 10, 10, 10] }).catch((e: unknown) => e);
+      // 잠금을 기다리는 실행기의 연결을 끊는다. 트랜잭션 안에서는 pg_stat_activity가 처음 본 그대로라 따로 접속해 본다.
+      await waitUntil(async () => {
+        const rows = await query(
+          url,
+          `select pg_terminate_backend(pid) from pg_stat_activity
+            where datname = current_database() and wait_event_type = 'Lock' and query like 'alter table%'`,
+        );
+        return rows.length === 1;
+      });
+      expect(await run).toMatchObject({ code: "57P01" });
+    } finally {
+      await holder.end();
+    }
+    expect(await records(url)).toHaveLength(1);
   });
 
   it("트랜잭션 밖 마이그레이션은 CONCURRENTLY로 인덱스를 만든다(BOM, CRLF 파일도)", async () => {
@@ -161,7 +197,7 @@ describe("마이그레이션 실행기", () => {
 
     const err = await runMigrations(url, { folder }).catch((e: Error) => e);
     expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toContain('DROP INDEX CONCURRENTLY IF EXISTS "t_v_idx";');
+    expect((err as Error).message).toContain("DROP INDEX CONCURRENTLY IF EXISTS public.t_v_idx;");
     expect((err as Error & { cause: { code: string } }).cause.code).toBe("23505");
     expect(await indexState(url)).toEqual([{ valid: false }]);
     expect(await records(url)).toHaveLength(1);
@@ -171,24 +207,56 @@ describe("마이그레이션 실행기", () => {
     expect(await indexState(url)).toEqual([{ valid: true }]);
   });
 
-  it("트랜잭션 밖 CONCURRENTLY도 열린 쓰기 트랜잭션을 1초만 기다린다", { timeout: 20_000 }, async () => {
+  it("CONCURRENTLY는 열린 트랜잭션이 끝나길 1초 넘게 기다리고, 그동안 같은 표의 쓰기를 막지 않는다", { timeout: 20_000 }, async () => {
     const url = await freshDatabase();
     const folder = folderWith([table, { tag: "0001_idx", when: 200, sql: indexOnV }]);
     await runMigrations(url, { folder: folderWith([table]) });
 
     const writer = await connect(url);
+    const app = await connect(url);
     try {
       await writer.query("begin");
       await writer.query("insert into t values (1, 1)");
-      const err = await runMigrations(url, { folder, ...fast }).catch((e: Error) => e);
-      expect((err as Error).message).toContain("INVALID 인덱스");
-      expect((err as Error & { cause: { code: string } }).cause.code).toBe("55P03");
+      let settled = false;
+      const run = runMigrations(url, { folder, ...fast }).finally(() => {
+        settled = true;
+      });
+      await waitUntil(async () => (await app.query("select 1 from pg_stat_progress_create_index")).rows.length === 1);
+      await sleep(1_500);
+      expect(settled).toBe(false);
+      // 앱 쓰기는 잠금 한도 1초 안에 된다(CONCURRENTLY의 잠금은 쓰기와 부딪히지 않는다)
+      await app.query("set lock_timeout = '1s'");
+      await app.query("insert into t values (2, 2)");
       await writer.query("commit");
+      expect(await run).toEqual(["0001_idx"]);
     } finally {
       await writer.end();
+      await app.end();
     }
-    expect(await runMigrations(url, { folder })).toEqual(["0001_idx"]);
     expect(await indexState(url)).toEqual([{ valid: true }]);
+  });
+
+  it("남이 지금 CONCURRENTLY로 만드는 중인 인덱스는 INVALID라도 알리지 않는다", { timeout: 20_000 }, async () => {
+    const url = await freshDatabase();
+    await runMigrations(url, { folder: folderWith([table]) });
+    const writer = await connect(url);
+    const builder = await connect(url);
+    try {
+      await writer.query("begin");
+      await writer.query("insert into t values (1, 1)");
+      // 열린 쓰기 트랜잭션을 기다리는 동안 이 인덱스는 INVALID다
+      const building = builder.query('CREATE INDEX CONCURRENTLY "t_other_idx" ON "t" ("v")');
+      await waitUntil(async () => (await query(url, "select 1 from pg_stat_progress_create_index")).length === 1);
+      const other = [NO_TRANSACTION_MARKER, "create table u (id int)"].join("\n");
+      expect(await runMigrations(url, { folder: folderWith([table, { tag: "0001_u", when: 200, sql: other }]) })).toEqual([
+        "0001_u",
+      ]);
+      await writer.query("commit");
+      await building;
+    } finally {
+      await writer.end();
+      await builder.end();
+    }
   });
 
   it("트랜잭션 밖 마이그레이션이 끝났어도 다른 INVALID 인덱스가 있으면 기록하지 않고 알린다", async () => {
@@ -206,7 +274,7 @@ describe("마이그레이션 실행기", () => {
     ].join("\n");
     const folder = folderWith([table, { tag: "0001_other", when: 200, sql: other }]);
     await expect(runMigrations(url, { folder })).rejects.toThrow(
-      /0001_other: INVALID 인덱스가 남아 있습니다. DROP INDEX CONCURRENTLY IF EXISTS "t_v_idx";$/,
+      /0001_other: INVALID 인덱스가 남아 있습니다. DROP INDEX CONCURRENTLY IF EXISTS public.t_v_idx;$/,
     );
     expect(await records(url)).toHaveLength(1);
   });
@@ -222,6 +290,13 @@ describe("마이그레이션 실행기", () => {
     expect(await runMigrations(url, { folder: folderWith([commented]) })).toEqual(["0000_t"]);
   });
 
+  it("트랜잭션 밖 마이그레이션의 한 조각에 문장이 둘이면 거절한다(한 번에 보내면 트랜잭션이 된다)", () => {
+    const twoInOne = [NO_TRANSACTION_MARKER, 'DROP INDEX CONCURRENTLY IF EXISTS "t_v_idx";', 'CREATE INDEX CONCURRENTLY "t_v_idx" ON "t" ("v");'];
+    expect(() => readMigrations(folderWith([table, { tag: "0001_idx", when: 200, sql: twoInOne.join("\n") }]))).toThrow(
+      /0001_idx: 트랜잭션 밖 마이그레이션은 조각마다 문장 하나/,
+    );
+  });
+
   it("journal의 when이 늘어나지 않으면 거절한다", () => {
     expect(() => readMigrations(folderWith([table, { tag: "0001_u", when: 100, sql: "select 1" }]))).toThrow(/when이 늘어나지/);
   });
@@ -235,11 +310,12 @@ describe("마이그레이션 실행기", () => {
     expect(await query(url, "select to_regclass('u') is null as no_u")).toEqual([{ no_u: true }]);
   });
 
-  it("실행기 둘이 함께 돌아도 마이그레이션마다 한 번씩만 적용한다", async () => {
+  it("실행기 둘이 함께 돌아도 한 번씩만 적용하고, CONCURRENTLY가 있어도 서로 막히지 않는다", async () => {
     const url = await freshDatabase();
-    const tags = readMigrations(repoFolder).map((m) => m.tag);
-    const results = await Promise.all([runMigrations(url), runMigrations(url)]);
-    expect(results.map((r) => r.length).sort()).toEqual([0, tags.length]);
-    expect(await records(url)).toHaveLength(tags.length);
+    const folder = folderWith([table, { tag: "0001_idx", when: 200, sql: indexOnV }]);
+    const results = await Promise.all([runMigrations(url, { folder }), runMigrations(url, { folder })]);
+    expect(results.map((r) => r.length).sort()).toEqual([0, 2]);
+    expect(await records(url)).toHaveLength(2);
+    expect(await indexState(url)).toEqual([{ valid: true }]);
   });
 });

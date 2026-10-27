@@ -11,13 +11,17 @@ const migrationsFolder = fileURLToPath(new URL("../../drizzle", import.meta.url)
 // 파일 첫 줄이 이것이면 트랜잭션 없이 문장을 하나씩 보낸다(CREATE INDEX CONCURRENTLY 등).
 export const NO_TRANSACTION_MARKER = "-- 트랜잭션 밖";
 const BREAKPOINT = "--> statement-breakpoint";
-// 실행기 둘이 같은 DB에 끼어들지 않게 잡는 세션 advisory lock 번호(테스트 준비의 7_340_101과 다르다).
+// 실행기 둘이 같은 DB에 끼어들지 않게 잡는 세션 advisory lock 번호.
 const MIGRATION_LOCK = 7_340_102;
 // 앱 쓰기의 잠금 대기 한도(3초)보다 짧아야, 마이그레이션 뒤에 줄 선 앱 쓰기가 자기 한도에 닿지 않는다.
 const LOCK_TIMEOUT = "1s";
 // 잠금 대기 초과와 교착이면 잠깐 쉬고 다시 한다. 다시 할 때마다 잠금 줄이 다시 생기므로 쉬는 시간을 늘린다.
 const RETRY_CODES = new Set(["55P03", "40P01"]);
 const RETRY_DELAYS_MS = [2_000, 4_000, 8_000];
+// 줄 주석을 지운 뒤 본다. 블록 주석·문자열 안의 것도 걸리지만 거절하는 쪽이라 괜찮다.
+const CONCURRENTLY = /\bconcurrently\b/i;
+const withoutComments = (sql: string) => sql.replace(/--.*$/gm, "");
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export type Migration = { tag: string; when: number; hash: string; statements: string[]; noTransaction: boolean };
 
@@ -38,14 +42,19 @@ export function readMigrations(folder = migrationsFolder): Migration[] {
       noTransaction: body.split("\n", 1)[0]!.trim() === NO_TRANSACTION_MARKER,
     };
   });
+  // 앞 마이그레이션이 커밋된 뒤에 멈추지 않게, DB에 손대기 전에 본다.
   migrations.forEach((m, i) => {
     if (i > 0 && m.when <= migrations[i - 1]!.when) {
       throw new Error(`journal의 when이 늘어나지 않습니다: ${migrations[i - 1]!.tag} 다음의 ${m.tag}`);
     }
-    // 트랜잭션 안의 CONCURRENTLY는 PostgreSQL이 25001로 거부한다. 앞 마이그레이션이 커밋된 뒤에 멈추지 않게 미리 본다.
-    const code = m.statements.map((s) => s.replace(/--.*$/gm, "")).join("\n");
-    if (!m.noTransaction && /\bconcurrently\b/i.test(code)) {
+    const code = m.statements.map(withoutComments);
+    // 트랜잭션 안의 CONCURRENTLY는 PostgreSQL이 25001로 거부한다.
+    if (!m.noTransaction && code.some((s) => CONCURRENTLY.test(s))) {
       throw new Error(`${m.tag}: CONCURRENTLY가 있으면 첫 줄에 "${NO_TRANSACTION_MARKER}"를 둡니다`);
+    }
+    // 한 번에 보낸 여러 문장은 암묵적인 트랜잭션이라 CONCURRENTLY가 거부된다.
+    if (m.noTransaction && code.some((s) => s.trim().replace(/;$/, "").includes(";"))) {
+      throw new Error(`${m.tag}: 트랜잭션 밖 마이그레이션은 조각마다 문장 하나입니다("${BREAKPOINT}"로 나눕니다)`);
     }
   });
   return migrations;
@@ -56,12 +65,17 @@ export async function runMigrations(connectionString: string, { folder = migrati
   // 세션 설정과 advisory lock이 연결에 붙어 있어 풀이 아니라 연결 하나로 한다.
   // 끝에 닫고 돌아온다(템플릿 DB에 연결이 남으면 바로 뒤의 복제가 실패한다).
   const client = new pg.Client({ connectionString });
+  // 연결이 끊기면 진행 중인 질의가 그 오류로 실패한다. 리스너가 없으면 같은 오류가 'error' 이벤트로 프로세스를 죽인다.
+  client.on("error", () => {});
   await client.connect();
   try {
     await checkOwner(client);
-    // 다른 실행기가 끝나길 기다린다. lock_timeout을 걸기 전에 잡아야 그 한도에 걸리지 않는다.
-    await client.query("select pg_advisory_lock($1)", [MIGRATION_LOCK]);
-    // 세션에 걸어야 트랜잭션 밖 문장(CONCURRENTLY가 기다리는 단계)에도 걸린다. 트랜잭션 밖의 SET LOCAL은 걸리지 않는다.
+    // 다른 실행기가 끝나길 기다린다. pg_advisory_lock으로 기다리면 그 문장의 스냅샷이 남아, 잠금을 쥔 쪽의 CONCURRENTLY가
+    // 그것이 끝나길 기다리며 서로 막힌다(리뷰 실험). 그래서 잡힐 때까지 잠깐씩 다시 묻는다. lock_timeout을 걸기 전에 잡는다.
+    while (!(await client.query<{ ok: boolean }>("select pg_try_advisory_lock($1) as ok", [MIGRATION_LOCK])).rows[0]!.ok) {
+      await sleep(200);
+    }
+    // 세션에 걸어야 트랜잭션 밖 문장에도 걸린다. 트랜잭션 밖의 SET LOCAL은 걸리지 않는다.
     await client.query(`set lock_timeout = '${LOCK_TIMEOUT}'`);
     await client.query('CREATE SCHEMA IF NOT EXISTS "drizzle"');
     await client.query(
@@ -69,13 +83,8 @@ export async function runMigrations(connectionString: string, { folder = migrati
     );
     const applied: string[] = [];
     for (const m of await pendingMigrations(client, migrations)) {
-      try {
-        await withRetry(m, retryDelaysMs, () => (m.noTransaction ? applyWithoutTransaction(client, m) : applyInTransaction(client, m)));
-      } catch (err) {
-        const invalid = m.noTransaction ? await invalidIndexes(client) : [];
-        if (invalid.length === 0) throw err;
-        throw new Error(`${m.tag}: INVALID 인덱스가 남아 있습니다. ${dropStatements(invalid)}`, { cause: err });
-      }
+      if (m.noTransaction) await applyWithoutTransaction(client, m, retryDelaysMs);
+      else await withRetry(m, retryDelaysMs, () => applyInTransaction(client, m));
       applied.push(m.tag);
     }
     return applied;
@@ -117,7 +126,7 @@ async function withRetry(m: Migration, delaysMs: number[], work: () => Promise<v
       const code = (err as { code?: string }).code;
       if (!code || !RETRY_CODES.has(code) || attempt >= delaysMs.length) throw err;
       console.warn(`${m.tag}: 잠금을 얻지 못했습니다(${code}). ${delaysMs[attempt]}ms 뒤 다시 합니다(${attempt + 1}/${delaysMs.length})`);
-      await new Promise((r) => setTimeout(r, delaysMs[attempt]));
+      await sleep(delaysMs[attempt]!);
     }
   }
 }
@@ -132,27 +141,52 @@ async function applyInTransaction(client: pg.Client, m: Migration) {
     await recordApplied(client, m);
     await client.query("commit");
   } catch (err) {
-    await client.query("rollback");
+    // 연결이 끊겼으면 서버가 이미 되돌렸다. 원래 오류를 낸다.
+    await client.query("rollback").catch(() => {});
     throw err;
   }
 }
 
 // 문장마다 따로 커밋된다. 중간에 실패하면 기록이 남지 않아 다음에 파일 처음부터 다시 도므로, 문장은 다시 해도 같은 결과여야 한다.
 // 실패한 CONCURRENTLY는 INVALID 인덱스를 남긴다. 계획에는 쓰이지 않으면서 쓰기마다 유지될 수 있어, 남아 있으면 기록하지 않고 실패한다.
-async function applyWithoutTransaction(client: pg.Client, m: Migration) {
-  for (const statement of m.statements) await client.query(statement);
-  if ((await invalidIndexes(client)).length > 0) throw new Error("문장은 끝났지만 기록하기 전에 INVALID 인덱스를 찾았습니다");
+async function applyWithoutTransaction(client: pg.Client, m: Migration, retryDelaysMs: number[]) {
+  const failure = await withRetry(m, retryDelaysMs, async () => {
+    for (const statement of m.statements) await runStatement(client, statement);
+  }).then(
+    () => undefined,
+    (err: unknown) => err,
+  );
+  const invalid = await invalidIndexes(client).catch(() => []);
+  if (invalid.length > 0) throw new Error(`${m.tag}: INVALID 인덱스가 남아 있습니다. ${dropStatements(invalid)}`, { cause: failure });
+  if (failure) throw failure;
   await recordApplied(client, m);
 }
 
+// CONCURRENTLY가 쥐는 SHARE UPDATE EXCLUSIVE는 읽기·쓰기와 부딪히지 않아, 기다려도 잠금 줄을 만들지 않는다.
+// 그래서 옛 트랜잭션과 스냅샷(백업 등)이 끝나길 한도 없이 기다린다. 1초 한도면 그런 것 앞에서 매번 실패하고 INVALID 인덱스만 남긴다.
+async function runStatement(client: pg.Client, statement: string) {
+  if (!CONCURRENTLY.test(withoutComments(statement))) {
+    await client.query(statement);
+    return;
+  }
+  await client.query("set lock_timeout = 0");
+  try {
+    await client.query(statement);
+  } finally {
+    await client.query(`set lock_timeout = '${LOCK_TIMEOUT}'`).catch(() => {});
+  }
+}
+
+// 남이 지금 만드는 중인 인덱스(CONCURRENTLY 도중에는 INVALID다)는 뺀다. 다른 role의 진행 행은 index_relid가 NULL로 보여 빠지지 않는다.
 async function invalidIndexes(client: pg.Client) {
   const { rows } = await client.query<{ name: string }>(
-    `select c.relname as name
+    `select format('%I.%I', n.nspname, c.relname) as name
        from pg_index i join pg_class c on c.oid = i.indexrelid join pg_namespace n on n.oid = c.relnamespace
       where not i.indisvalid and n.nspname = 'public'
+        and not exists (select 1 from pg_stat_progress_create_index p where p.index_relid = i.indexrelid)
       order by 1`,
   );
   return rows.map((r) => r.name);
 }
 
-const dropStatements = (names: string[]) => names.map((n) => `DROP INDEX CONCURRENTLY IF EXISTS "${n}";`).join(" ");
+const dropStatements = (names: string[]) => names.map((n) => `DROP INDEX CONCURRENTLY IF EXISTS ${n};`).join(" ");
