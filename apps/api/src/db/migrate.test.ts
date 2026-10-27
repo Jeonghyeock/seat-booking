@@ -218,7 +218,8 @@ describe("마이그레이션 실행기", () => {
       await writer.query("begin");
       await writer.query("insert into t values (1, 1)");
       let settled = false;
-      const run = runMigrations(url, { folder, ...fast }).finally(() => {
+      // 다시 하지 않게 해, 1초 한도가 걸렸다면 아래 1.5초 뒤에 이미 끝나 있게 한다
+      const run = runMigrations(url, { folder, retryDelaysMs: [] }).finally(() => {
         settled = true;
       });
       await waitUntil(async () => (await app.query("select 1 from pg_stat_progress_create_index")).rows.length === 1);
