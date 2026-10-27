@@ -52,6 +52,8 @@ jobs:
             apps/api/src/load/lock-events-cli.ts \
             apps/api/src/load/run-cli.ts \
             apps/api/src/load/template-cli.ts \
+            apps/api/src/ops/backup-rehearsal-cli.ts \
+            apps/api/src/ops/pitr-rehearsal-cli.ts \
             apps/api/test/global-setup.ts \
             apps/web/playwright.config.ts)"
           test "$found" = "$expected" || { echo "$found"; exit 1; }
