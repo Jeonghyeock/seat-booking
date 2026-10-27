@@ -114,6 +114,23 @@ describe("POST /holds/:id/orders, GET /orders/:id", () => {
     expect(await countOrders(hold.holdId)).toBe(1);
   });
 
+  // 배포 전에 저장된 응답은 새 필드 없이 그대로 다시 나간다. 응답 스키마가 그것을 받아야 한다(API의 expand → contract, DESIGN 6.7).
+  it("paidAt을 더하기 전에 저장된 응답(필드 없음)도 같은 키로 다시 보내면 그대로 201이다", async () => {
+    const { userId, hold } = await newHold();
+    const key = randomUUID();
+    const first = await createOrder(hold.holdId, userId, key);
+    expect(first.json()).toHaveProperty("paidAt", null);
+    await admin.query("update idempotency_keys set response_body = response_body - 'paidAt' where user_id = $1 and key = $2", [
+      userId,
+      key,
+    ]);
+
+    const again = await createOrder(hold.holdId, userId, key);
+    expect(again.statusCode).toBe(201);
+    expect(again.headers["idempotent-replayed"]).toBe("true");
+    expect(again.json()).not.toHaveProperty("paidAt");
+  });
+
   it("같은 키를 다른 선점에 쓰면 422 IDEMPOTENCY_KEY_REUSED", async () => {
     const { userId, hold, performanceId, seatIds } = await newHold(1);
     const other = HoldResponse.parse(

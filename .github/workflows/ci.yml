@@ -57,9 +57,11 @@ jobs:
           # 테스트는 앱 role로 돈다. 소유자 주소를 받는 테스트도 정해 둔다.
           found="$(src ownerDatabaseUrl)"
           expected="$(printf '%s\n' \
+            apps/api/src/db/lock-rehearsal.test.ts \
             apps/api/src/db/migrate.test.ts \
             apps/api/src/db/roles.test.ts \
             apps/api/src/load/template.test.ts \
+            apps/api/src/ops/backfill-paid-at.test.ts \
             apps/api/src/routes/seat-map-plan.test.ts \
             apps/api/test/global-setup.ts)"
           test "$found" = "$expected" || { echo "$found"; exit 1; }

@@ -74,6 +74,14 @@ describe("3단계 표의 제약", () => {
       await expect(update("cancelled", "expired")).resolves.toMatchObject({ rowCount: 1 });
     });
 
+    it("paid 주문에는 결제 확정 시각이 있다(23514)", async () => {
+      const { orderId } = await newOrder();
+      const pay = (paidAt: string | null) =>
+        pool.query("update orders set status = 'paid', paid_at = $2 where id = $1", [orderId, paidAt]);
+      await expect(pay(null)).rejects.toMatchObject({ code: "23514", constraint: "orders_paid_at_set" });
+      await expect(pay(new Date().toISOString())).resolves.toMatchObject({ rowCount: 1 });
+    });
+
     it("금액은 음수가 아니다(23514)", async () => {
       const { orderId } = await newOrder();
       await expect(pool.query("update orders set amount = -1 where id = $1", [orderId])).rejects.toMatchObject({

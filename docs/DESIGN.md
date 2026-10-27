@@ -728,8 +728,17 @@ bus-review에서는 Supabase가 대신 해 줬던 부분을 직접 만든다. 3�
      4. `CHECK (status <> 'paid' OR paid_at IS NOT NULL) NOT VALID`를 건다. 이것도 `ACCESS EXCLUSIVE`지만 옛 행을 훑지 않아 짧다(리뷰 실험).
      5. `VALIDATE CONSTRAINT`로 옛 행을 검사한다. 쓰기를 막지 않는 잠금(`SHARE UPDATE EXCLUSIVE`)이다.
      6. 앱이 읽는다.
-   - 3은 마이그레이션이 아니라 명령(`ops:backfill-paid-at`)이다. 한 트랜잭션에 전부 넣으면 오래 잠그고, 실패하면 되돌릴 것이 크다. 다시 해도 같은 결과다(`paid_at IS NULL`인 행만 채운다).
-3. **잠금 리허설**: 막는 것과 막지 않는 것의 근거는 결정적인 잠금 시험으로 남긴다. 결과는 대기 시간과 오류 코드다.
+   - 마이그레이션은 1(0010), 4(0011), 5(0012)다. 2와 6은 코드이고, 3은 명령이다.
+   - 3은 마이그레이션이 아니라 명령(`ops:backfill-paid-at`)이다.
+     - 한 트랜잭션에 전부 넣으면 오래 잠그고, 실패하면 되돌릴 것이 크다.
+     - id 순서로 1,000행씩 문장마다 커밋한다. 기본 키 인덱스로 다음 묶음을 찾아 표를 매번 훑지 않는다.
+     - 다시 해도 같은 결과다(`paid_at IS NULL`인 paid 주문만 채운다). DML만 하므로 앱 role로 돈다.
+   - 3 전에 5를 돌리면 23514로 실패한다(테스트). 그래서 한 번에 `db:migrate`를 돌리는 DB(옛 paid 주문이 있는 DB)는 4까지 적용되고 5에서 멈춘다. 3을 돌린 뒤 다시 돌린다. 운영 문서에 적는다.
+   - 결제된 주문을 직접 넣는 곳(부하 데이터, 테스트 셋)도 `paid_at`을 넣는다. 4부터 새 행은 검사된다.
+   - **API의 expand → contract**: 주문 생성 응답(201)은 멱등 키에 저장됐다가 같은 키로 다시 나간다. 그 응답은 응답 스키마를 거친다.
+     - 그래서 `OrderView.paidAt`을 필수로 두면, 배포 전에 저장된 응답(필드 없음)이 다시 나갈 때 500이 된다. `paidAt`은 nullable이면서 없어도 되게 둔다(테스트).
+     - 내 예매는 저장해 두었다 다시 주지 않아 늘 있다.
+3. **잠금 리허설**: 막는 것과 막지 않는 것의 근거는 결정적인 잠금 시험(`lock-rehearsal.test.ts`, CI에서 돈다)으로 남긴다. 결과는 대기 시간과 오류 코드다.
    - 리뷰 실험에서 큰 표(`performance_seats` 40만 행)의 인덱스는 0.1초대에 만들어졌다. 이렇게 짧으면 부하 중 1초 지표로는 보통 `CREATE INDEX`와 `CONCURRENTLY`가 구별되지 않는다.
    - 시험 A, 인덱스: 보통 `CREATE INDEX`를 열린 트랜잭션 안에 두고(큰 표의 긴 빌드를 흉내 냄) 그 동안 `UPDATE performance_seats`(선점·취소·결제가 쓴다)가 기다리는지 본다. `CONCURRENTLY`가 기다리는 동안에는 같은 `UPDATE`가 바로 되는지 본다.
    - 시험 B, 잠금 줄: idle in transaction 보유자 뒤에 `ALTER TABLE orders ADD COLUMN`을 둔다. 그 뒤의 앱 쓰기와 읽기가 얼마나 기다리는지, 마이그레이션 `lock_timeout` 없음·1초에서 본다. `orders`는 S3가 반복마다 읽고 쓴다.
@@ -966,6 +975,6 @@ seat-booking/
 93. 테스트는 앱 role로 돈다. global-setup이 소유자로 DB를 만들고 마이그레이션한 뒤 앱 role 주소를 준다. 소유자 주소는 실행 계획 테스트(`ANALYZE`), 권한 테스트, 실행기·부하 템플릿 확인 테스트만 받는다(CI가 목록을 확인한다). 테스트는 오류 메시지가 아니라 코드로 본다(로컬은 한국어, CI는 영어). (AI 판단)
 94. 마이그레이션 실행기를 직접 둔다. drizzle migrator는 전부를 한 트랜잭션에서 돌려 `CONCURRENTLY`를 쓸 수 없고, 하나가 실패하면 앞의 것까지 되돌아가며, 하나만 다시 할 수 없다. drizzle의 파일·journal·적용 기록 표·남은 것을 고르는 규칙은 그대로 따른다. 거기에 journal과 기록이 어긋나면(마지막 기록보다 작은 `when`이 기록 없이 있으면) 실패하는 검사를 더한다. hash로는 아무것도 정하지 않는다(줄바꿈에 따라 달라진다). 연결 하나로 하고, 그 연결의 role이 DB 소유자이며 슈퍼유저가 아닌지 먼저 본다. 세션 advisory lock은 `pg_try_advisory_lock`을 다시 물어 잡는다(막혀 기다리면 그 스냅샷 때문에 `CONCURRENTLY`와 교착). 마이그레이션마다 트랜잭션을 하나씩 두고, 세션에 `lock_timeout = '1s'`를 건다. 앱 쓰기의 잠금 한도(3초)보다 짧아야 그 뒤에 줄 선 앱 쓰기가 자기 한도에 닿지 않는다. `CONCURRENTLY` 문장만 한도 없이 기다린다(쓰기와 부딪히지 않아 잠금 줄을 만들지 않는다). 55P03·40P01이면 2·4·8초를 쉬고 세 번까지 다시 한다. 연결이 끊겨도 프로세스를 죽이지 않고 그 오류를 낸다. (AI 판단, 리뷰 반영)
 95. 파일 첫 줄이 `-- 트랜잭션 밖`인 마이그레이션은 트랜잭션 없이 문장을 하나씩 보내고, 다시 할 때는 파일 처음부터 한다. 모든 문장은 다시 해도 같은 결과여야 한다. `CREATE INDEX CONCURRENTLY`는 `DROP INDEX CONCURRENTLY IF EXISTS` 다음에 쓰고, `IF NOT EXISTS`는 쓰지 않는다(실패로 남은 INVALID 인덱스를 건너뛴다). 실행기는 트랜잭션 밖 마이그레이션마다 INVALID 인덱스(남이 만드는 중인 것은 뺌)를 보고, 있으면 기록하지 않고 지울 문장을 내고 실패한다. DB에 손대기 전에, 표시 없는 파일에 `CONCURRENTLY`가 있거나 표시 있는 파일의 한 조각에 문장이 둘이면 거절한다. `schema.ts`에는 보통 `index()`로 두고 생성된 SQL을 손으로 고친다. (AI 판단, 리뷰 반영)
-96. 무중단 마이그레이션 예시는 둘이다. 하나는 `holds(performance_id)`를 `CONCURRENTLY`로 만드는 것이다(관리자 판매 현황, 10장 65). 다른 하나는 `orders.paid_at`(결제 확정 시각)을 expand → contract로 더하는 것이다: nullable 열 → 앱이 씀 → 옛 paid 주문을 1,000행씩 채우는 명령 → `CHECK … NOT VALID` → `VALIDATE` → 읽기(`OrderView`·내 예매의 `paidAt`). 지금은 paid가 끝 상태라 `updated_at`과 같은데, 그것은 우연한 일치다. 운영 예시로 고른 것이다. 막는 것과 막지 않는 것의 근거는 결정적인 잠금 시험(대기 시간과 오류 코드)으로 남긴다. 큰 표의 인덱스도 0.1초대라 부하 중 1초 지표로는 구별되지 않기 때문이다. 부하 중 리허설은 탐색 한 번의 참고 숫자다. (AI 판단, 리뷰 반영)
+96. 무중단 마이그레이션 예시는 둘이다. 하나는 `holds(performance_id)`를 `CONCURRENTLY`로 만드는 것이다(관리자 판매 현황, 10장 65). 다른 하나는 `orders.paid_at`(결제 확정 시각)을 expand → contract로 더하는 것이다: nullable 열 → 앱이 씀 → 옛 paid 주문을 1,000행씩 채우는 명령 → `CHECK … NOT VALID` → `VALIDATE` → 읽기(`OrderView`·내 예매의 `paidAt`). 지금은 paid가 끝 상태라 `updated_at`과 같은데, 그것은 우연한 일치다. 운영 예시로 고른 것이다. 막는 것과 막지 않는 것의 근거는 결정적인 잠금 시험(대기 시간과 오류 코드)으로 남긴다. 큰 표의 인덱스도 0.1초대라 부하 중 1초 지표로는 구별되지 않기 때문이다. 부하 중 리허설은 탐색 한 번의 참고 숫자다. 응답에 더하는 필드(`OrderView.paidAt`)는 없어도 되게 둔다. 멱등 키에 저장된 배포 전 응답이 그대로 다시 나가기 때문이다. (AI 판단, 리뷰 반영, 구현 때 더함)
 97. C8 합격은 논리 백업으로 판정한다. 부하 템플릿을 복제한 조용한 DB를 소유자로 `pg_dump -Fc` 하고, 새 DB에 `pg_restore -j 4`로 복구한다. 표마다(`public`, `drizzle`) 행 수와 checksum(`sum(hashtextextended(t::text, 0))`, `TimeZone` UTC·`DateStyle` ISO로 잼)이 같고, 시퀀스마다 `last_value`·`is_called`가 같아야 한다. 템플릿에서 바로 덤프하지 않는다. "스냅샷 뒤의 쓰기가 없다"는 `pg_export_snapshot()`과 `pg_dump --snapshot`으로 결정적으로 보인다(시퀀스는 스냅샷을 따르지 않아 뺀다). 통계는 18의 기본값으로는 담기지 않는다(`--statistics`로 담을 수 있다). 숫자는 덤프 크기·덤프 시간·복구 시간이다. (AI 판단, 리뷰 반영)
 98. 물리 백업과 시점 복구는 리허설 클러스터에서 하는 참고이고, 시간을 정해 둔다. 리허설 클러스터는 `initdb`로 만들고, 다른 포트에서 127.0.0.1만 듣게 띄운다. 사용자 서버에는 `REPLICATION` role을 두지 않는다. 그 권한은 클러스터의 모든 파일(비밀번호 해시 포함)을 읽는다. 서비스 설정을 바꾸지 않는다는 조건은 그대로 두고, WAL은 영구 슬롯 없는 `pg_receivewal`로 받는다. 판정은 `pg_ctl`의 성공이 아니라 로그(`recovery stopping before commit`)로 한다. 목표 없는 복구와 목표 T 복구를 짝으로 본다. T는 오프셋을 붙인 `clock_timestamp()`이고, 마지막 쓰기 뒤에도 `pg_switch_wal()`을 한다. 리뷰 실험에서 WAL이 모자라거나 Windows `restore_command`가 틀린 경우 모두 오류 없이 행을 잃었다. 끝에 클러스터와 받기를 반드시 멈추고 지운다. (AI 판단, 리뷰 반영)

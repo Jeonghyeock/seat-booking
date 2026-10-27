@@ -108,7 +108,7 @@ describe("관리자 경로", () => {
 
   // 결제 확정(웹훅 대신 행을 바로 바꾼다).
   async function markPaid(order: OrderView) {
-    await pool.query("update orders set status = 'paid' where id = $1", [order.orderId]);
+    await pool.query("update orders set status = 'paid', paid_at = now() where id = $1", [order.orderId]);
     await pool.query("update performance_seats set status = 'sold' where hold_id = $1", [order.holdId]);
     await insertPayment(order.orderId, "succeeded", order.amount);
   }
