@@ -38,6 +38,16 @@
 - 꺾이는 점: `--scenarios s2 --s2-rates 50,100,150,200,250,300 --s2-step 60`
 - C2: `--scenarios s1 --s1-mode hot`
 
+## 잠금 리허설(7단계)
+
+`load:run`이 S3를 도는 동안 다른 창에서 부하 DB에 잠금 이벤트를 겁니다(DESIGN 6.7 "부하 중 리허설", 결과는 [RESULTS.md](RESULTS.md)).
+
+1. `npm run load:run -w @seat-booking/api -- --scenarios s3 --s3-rates 30 --s3-warmup 20 --s3-step 240 --label lock-rehearsal`
+2. 바로 다른 창에서 `npm run load:lock-events -w @seat-booking/api -- --delay 70 --gap 30 --hold 5`
+   - 보통 `CREATE INDEX`(A1), `CONCURRENTLY`(A2), 한도 없는 `ALTER`(B1), `lock_timeout` 1초의 `ALTER`(B2)를 차례로 겁니다.
+   - 시작·끝 시각을 `load/results/lock-events-<시각>.jsonl`에 씁니다.
+3. `npm run load:lock-report -w @seat-booking/api -- <결과 폴더> <lock-events 파일>`로 이벤트마다 요청 수, 5xx, 가장 느린 요청을 봅니다.
+
 ## 결과 폴더
 
 | 파일 | 내용 |

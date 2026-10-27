@@ -49,6 +49,7 @@ jobs:
             apps/api/src/db/migrate-cli.ts \
             apps/api/src/db/seed-cli.ts \
             apps/api/src/e2e-serve-cli.ts \
+            apps/api/src/load/lock-events-cli.ts \
             apps/api/src/load/run-cli.ts \
             apps/api/src/load/template-cli.ts \
             apps/api/test/global-setup.ts \
