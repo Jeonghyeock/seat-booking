@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import pg from "pg";
 import { hashSessionToken, sessionCookieName } from "../auth.js";
 import { dropDatabase, withAdminClient, withDatabase } from "../db/databases.js";
-import { runMigrations } from "../db/migrate.js";
+import { readMigrations, runMigrations } from "../db/migrate.js";
 import { createPool } from "../db/pool.js";
 import { type LoadData, type LoadShape, seedLoadData } from "./data.js";
 
@@ -58,6 +58,24 @@ export async function cloneLoadDatabase(baseUrl: string) {
     await client.query(`CREATE DATABASE ${LOAD_DATABASE} TEMPLATE ${TEMPLATE_DATABASE} STRATEGY FILE_COPY`);
   });
   return withDatabase(baseUrl, LOAD_DATABASE);
+}
+
+// 복제한 DB가 저장소의 마지막 마이그레이션까지 적용한 템플릿에서 나왔는지 본다. 오래된 템플릿은 권한(0008)이나 열이 달라,
+// 앱 role로 돌리면 알기 어려운 42501로 끝난다. 적용 기록(drizzle 스키마)은 소유자만 읽는다.
+export async function verifyTemplateMigrations(loadOwnerUrl: string) {
+  const last = readMigrations().at(-1)!;
+  const client = new pg.Client({ connectionString: loadOwnerUrl });
+  await client.connect();
+  try {
+    const { rows } = await client.query<{ last: string | null }>(
+      'select max(created_at)::text as last from "drizzle"."__drizzle_migrations"',
+    );
+    if (Number(rows[0]?.last) !== last.when) {
+      throw new Error(`템플릿 DB가 마지막 마이그레이션(${last.tag})까지 적용되지 않았습니다. npm run load:template으로 다시 만드세요`);
+    }
+  } finally {
+    await client.end();
+  }
 }
 
 // 복제한 DB에서 S1 회차의 판매 시작만 이번 측정의 T0로 바꾼다.

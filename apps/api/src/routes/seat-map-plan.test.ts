@@ -39,7 +39,16 @@ describe("좌석 지도 조회의 실행 계획", () => {
        select more.id, s.id from more, seats s where s.venue_id = $1`,
       [venueId, performanceIds[0]],
     );
-    await owner.query("analyze performance_seats, seats, performance_grades");
+    // 권한이 없으면 ANALYZE는 오류 없이 경고만 내고 건너뛴다. 경고가 없어야 통계가 생겼다.
+    const analyzer = await owner.connect();
+    const warnings: string[] = [];
+    analyzer.on("notice", (n: { code?: string }) => warnings.push(n.code ?? ""));
+    try {
+      await analyzer.query("analyze performance_seats, seats, performance_grades");
+    } finally {
+      analyzer.release();
+    }
+    expect(warnings).toEqual([]);
 
     const query = new PgDialect().sqlToQuery(seatMapSql(performanceIds[0]!));
     const { rows } = await pool.query<{ "QUERY PLAN": [{ Plan: PlanNode }] }>(

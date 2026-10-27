@@ -10,7 +10,7 @@
     "db:seed": "tsx --env-file-if-exists=../../.env src/db/seed-cli.ts",
     "admin:promote": "tsx --env-file-if-exists=../../.env src/promote-cli.ts",
     "e2e:prepare": "tsx src/db/e2e-prepare-cli.ts",
-    "e2e:serve": "tsx src/main.ts",
+    "e2e:serve": "tsx src/e2e-serve-cli.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "load:template": "tsx --env-file-if-exists=../../.env src/load/template-cli.ts",

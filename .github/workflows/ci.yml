@@ -38,17 +38,30 @@ jobs:
           grep -rIni --include='*.ts' --exclude='*.test.ts' 'x-user-id' apps/api/src packages/shared/src || rc=$?
           test "$rc" -eq 1
       # 소유자 주소는 마이그레이션·시드·테스트와 E2E·부하 준비만 읽는다(DESIGN 6.7). 서버와 앱 코드는 앱 role(DML만)이다.
-      - name: DATABASE_OWNER_URL을 읽는 곳이 정해진 파일뿐인지
+      - name: 소유자 주소를 쓰는 곳이 정해진 파일뿐인지
         run: |
-          found="$(grep -rIl --include='*.ts' --exclude-dir=node_modules 'DATABASE_OWNER_URL' apps packages | sort)"
+          src() { grep -rIl --include='*.ts' --include='*.tsx' --include='*.mts' --include='*.cts' \
+            --include='*.js' --include='*.mjs' --include='*.cjs' --include='package.json' \
+            --exclude-dir=node_modules --exclude-dir=dist "$1" apps packages | sort; }
+          found="$(src DATABASE_OWNER_URL)"
           expected="$(printf '%s\n' \
             apps/api/src/db/e2e-prepare-cli.ts \
             apps/api/src/db/migrate-cli.ts \
             apps/api/src/db/seed-cli.ts \
+            apps/api/src/e2e-serve-cli.ts \
             apps/api/src/load/run-cli.ts \
             apps/api/src/load/template-cli.ts \
             apps/api/test/global-setup.ts \
             apps/web/playwright.config.ts)"
+          test "$found" = "$expected" || { echo "$found"; exit 1; }
+          # 테스트는 앱 role로 돈다. 소유자 주소를 받는 테스트도 정해 둔다.
+          found="$(src ownerDatabaseUrl)"
+          expected="$(printf '%s\n' \
+            apps/api/src/db/migrate.test.ts \
+            apps/api/src/db/roles.test.ts \
+            apps/api/src/load/template.test.ts \
+            apps/api/src/routes/seat-map-plan.test.ts \
+            apps/api/test/global-setup.ts)"
           test "$found" = "$expected" || { echo "$found"; exit 1; }
       # 로컬과 같게 슈퍼유저가 아닌 role 둘(소유자, 앱)로 마이그레이션과 테스트를 돌린다.
       # 비밀번호는 실행마다 새로 만들어, 저장소에 비밀번호 글자가 남지 않게 한다.

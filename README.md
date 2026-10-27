@@ -15,7 +15,7 @@ TypeScript · Fastify · Drizzle ORM · PostgreSQL 18 · zod · Vitest · React 
 필요: Node.js 22.22 이상(24.x 권장), PostgreSQL 18.
 
 슈퍼유저가 아닌 role 둘로 접속한다. 슈퍼유저로 psql에 들어가 한 번만 만든다.
-- 소유자 `seat_booking`: 표의 주인이다. 마이그레이션·시드·테스트 준비가 쓴다. `CREATEDB`는 테스트가 DB를 복제하는 데 쓴다.
+- 소유자 `seat_booking`: 표의 주인이다. 마이그레이션·시드와 테스트·E2E·부하 준비가 쓴다. `CREATEDB`는 테스트가 DB를 복제하는 데 쓴다.
 - 앱 `seat_booking_app`: 서버가 쓴다. DML만 하고, 권한은 마이그레이션이 준다.
 - 마지막 줄은 소유자가 앱 연결이 남은 테스트 DB를 지울 수 있게 한다.
 

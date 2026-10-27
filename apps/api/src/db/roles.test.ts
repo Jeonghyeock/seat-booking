@@ -9,11 +9,12 @@ describe("앱 role의 권한", () => {
   const owner = new pg.Pool({ connectionString: inject("ownerDatabaseUrl"), max: 1 });
   afterAll(() => Promise.all([app.end(), owner.end()]));
 
-  // 트랜잭션 안에서 work를 하고 되돌린다. 그 사이의 notice(경고)를 모아 준다.
+  // 트랜잭션 안에서 work를 하고 되돌린다. 그 사이의 notice(경고)를 "코드 메시지"로 모아 준다.
+  // GRANT·REVOKE·ANALYZE는 권한을 보기 전에 표 잠금을 기다린다. 공유 DB에서 venues를 강하게 잠그는 테스트는 없다.
   async function inRolledBack(pool: pg.Pool, work: (client: pg.PoolClient, notices: string[]) => Promise<void>) {
     const client = await pool.connect();
     const notices: string[] = [];
-    const onNotice = (n: { code?: string }) => notices.push(n.code ?? "");
+    const onNotice = (n: { code?: string; message?: string }) => notices.push(`${n.code} ${n.message}`);
     client.on("notice", onNotice);
     try {
       await client.query("begin");
@@ -31,6 +32,15 @@ describe("앱 role의 권한", () => {
          from pg_database d, pg_roles r where d.datname = current_database() and r.rolname = current_user`,
     );
     expect(rows).toEqual([{ role: "seat_booking_app", owner: false, superuser: false }]);
+  });
+
+  // 이것이 없으면 앱 연결이 남은 테스트·E2E·부하 DB를 소유자가 DROP … WITH (FORCE)로 지우지 못한다(README role 만들기).
+  it("소유자는 앱 role의 권한을 이어받아 그 연결을 끊을 수 있고, 거꾸로는 아니다", async () => {
+    const { rows } = await owner.query(
+      `select pg_has_role('seat_booking', 'seat_booking_app', 'USAGE') as owner_has_app,
+              pg_has_role('seat_booking_app', 'seat_booking', 'MEMBER') as app_has_owner`,
+    );
+    expect(rows).toEqual([{ owner_has_app: true, app_has_owner: false }]);
   });
 
   it.each([
@@ -55,16 +65,18 @@ describe("앱 role의 권한", () => {
     await inRolledBack(app, async (client, notices) => {
       await client.query("grant select on venues to public");
       await client.query("revoke select on venues from seat_booking_app");
-      expect(notices).toContain("01007");
-      expect(notices).toContain("01006");
+      expect(notices.map((n) => n.split(" ")[0])).toEqual(expect.arrayContaining(["01007", "01006"]));
     });
     expect(await acl()).toEqual(before);
   });
 
+  // 01000은 일반 경고 코드라, 메시지에 표 이름이 있는지도 본다(메시지 말은 로컬과 CI가 다르다).
+  const skipped = [expect.stringMatching(/^01000 .*"venues"/)];
+
   it("ANALYZE는 경고만 내고 건너뛴다", async () => {
     await inRolledBack(app, async (client, notices) => {
       await client.query("analyze venues");
-      expect(notices).toEqual(["01000"]);
+      expect(notices).toEqual(skipped);
     });
   });
 
@@ -72,11 +84,11 @@ describe("앱 role의 권한", () => {
     // VACUUM은 트랜잭션 안에서 돌지 않는다
     const client = await app.connect();
     const notices: string[] = [];
-    const onNotice = (n: { code?: string }) => notices.push(n.code ?? "");
+    const onNotice = (n: { code?: string; message?: string }) => notices.push(`${n.code} ${n.message}`);
     client.on("notice", onNotice);
     try {
       await client.query("vacuum venues");
-      expect(notices).toEqual(["01000"]);
+      expect(notices).toEqual(skipped);
     } finally {
       client.off("notice", onNotice);
       client.release();

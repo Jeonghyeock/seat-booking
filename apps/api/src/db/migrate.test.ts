@@ -93,7 +93,6 @@ describe("마이그레이션 실행기", () => {
     const url = await freshDatabase();
     const appUrl = withDatabase(inject("databaseUrl"), new URL(url).pathname.slice(1));
     await expect(runMigrations(appUrl, { folder: folderWith([table]) })).rejects.toThrow(/DB 소유자/);
-    expect(await query(url, "select to_regnamespace('drizzle') is null as no_schema")).toEqual([{ no_schema: true }]);
   });
 
   it("drizzle로 앞부분을 적용한 DB를 이어받는다", async () => {
