@@ -475,7 +475,7 @@ bus-review에서는 Supabase가 대신 해 줬던 부분을 직접 만든다. 3�
 **E2E.** Playwright 한 시나리오다: 가입(시도마다 새 이메일) → 공연 → 좌석 지도에서 처음 나오는 고를 수 있는 좌석 둘 → 선점 → 주문 → 결제(성공) → 결제 완료(이 단언만 15초) → 내 예매에 있음.
 - 다른 DB(`seat_booking_e2e`)와 다른 포트(API 3101, 화면 5174)를 쓴다. 브라우저 쪽 주소는 baseURL·`APP_ORIGIN`·Vite 모두 `http://127.0.0.1:5174` 하나로 맞춘다(localhost를 IPv4·IPv6 중 어디로 푸는지가 도구마다 달라 섞지 않는다).
 - webServer는 API, 화면 순서다. Playwright는 webServer를 `globalSetup`보다 먼저 띄우므로 DB 준비(지우기·만들기·마이그레이션·옮긴 시드)는 API를 띄우는 명령 안에서 한다. 준비 명령은 대상 DB 이름을 스스로 정한다(`seat_booking_e2e`만 받는다. 개발 DB를 지우지 않게). 테스트 DB 지우기의 42501 재시도를 다시 쓴다.
-- API 환경은 `webServer.env`로 준비와 API가 읽는 키 아홉 개를 모두 준다: `DATABASE_URL`(e2e, 앱 role), `DATABASE_OWNER_URL`(e2e, 소유자, 준비만 읽음, 7단계), `PORT=3101`, `HOST=127.0.0.1`, `APP_ORIGIN=http://127.0.0.1:5174`, `COOKIE_SECURE=false`, `AUTH_RATE_LIMIT_PER_MINUTE=10`, `TRUST_PROXY=""`, `FAKE_PAY_SECRET=""`. 명령줄 `VAR=x`는 Windows cmd에서 안 되고, `--env-file`은 넘기지 않은 키를 `.env`에서 채우므로 API는 `start` 스크립트가 아니라 `tsx src/main.ts`로 띄운다. 기본 DB 주소는 환경 변수, 없으면 `.env`에서 `DATABASE_URL` 하나만 읽는다(슈퍼유저 비밀번호를 webServer로 퍼뜨리지 않게).
+- API 환경은 `webServer.env`로 준비와 API가 읽는 키 아홉 개를 모두 준다: `DATABASE_URL`(e2e, 앱 role), `DATABASE_OWNER_URL`(e2e, 소유자, 준비만 읽음, 7단계), `PORT=3101`, `HOST=127.0.0.1`, `APP_ORIGIN=http://127.0.0.1:5174`, `COOKIE_SECURE=false`, `AUTH_RATE_LIMIT_PER_MINUTE=10`, `TRUST_PROXY=""`, `FAKE_PAY_SECRET=""`. 명령줄 `VAR=x`는 Windows cmd에서 안 되고, `--env-file`은 넘기지 않은 키를 `.env`에서 채우므로 API는 `start` 스크립트가 아니라 `tsx`로 띄운다(7단계부터 `e2e-serve-cli.ts`가 소유자 주소를 지우고 `main.ts`를 띄운다). 기본 DB 주소는 환경 변수, 없으면 `.env`에서 `DATABASE_URL`(7단계부터 `DATABASE_OWNER_URL`도)만 읽는다(슈퍼유저 비밀번호를 webServer로 퍼뜨리지 않게).
 - `reuseExistingServer: false`다(밀려난 개발 서버에 붙어 개발 DB에 가입·결제하지 않게). `workers: 1`, CI에서는 `retries: 1`, `forbidOnly`, 실패 trace를 남긴다.
 - `npm test`에 넣지 않고 `test:e2e`로 따로 둔다. CI는 기존 job에 화면 build를 더하고(typecheck와 단위 테스트는 워크스페이스로 들어간다), E2E job을 따로 둔다(Postgres 서비스, 앱 role·DB 만들기, `playwright install --with-deps --only-shell chromium`, 실패하면 리포트를 올린다, 15분 제한). 브라우저는 캐시하지 않는다.
 
@@ -665,14 +665,15 @@ bus-review에서는 Supabase가 대신 해 줬던 부분을 직접 만든다. 3�
   - 42501로 실패한다: `CREATE`(표, 인덱스, 스키마, 함수), `ALTER`, `DROP`, `TRUNCATE`, role GRANT, `SET ROLE seat_booking`, `drizzle` 스키마(적용 기록) 읽기.
   - 오류 없이 아무것도 바꾸지 못한다
     - 표의 `GRANT`·`REVOKE`: 경고(01007·01006)만 내고, 권한(`relacl`)이 그대로다.
-    - `ANALYZE`·`VACUUM`: 표마다 경고(01000)만 내고 건너뛴다. 테스트는 `pg_stat_user_tables.analyze_count`가 그대로인지 본다.
+    - `ANALYZE`·`VACUUM`: 표마다 경고(01000)만 내고 건너뛴다. 01000은 일반 경고 코드라 테스트는 메시지의 표 이름도 본다. 누적 통계(`analyze_count`)는 늦게 반영되어 쓰지 않는다.
   - 된다
     - DML, identity 열 `INSERT`
     - 임시 표(`PUBLIC`의 `TEMPORARY`, 부하 데이터 테스트가 쓴다)
     - `LOCK TABLE`(UPDATE·DELETE 권한으로 된다. 앱 role도 표를 얼릴 수 있다. 테스트 둘이 쓴다)
   - 테스트는 메시지 글자가 아니라 `code`와 notice의 `code`·`severity`로 본다. 로컬 서버는 한국어, CI는 영어로 낸다.
 - **테스트는 앱 role로 돈다**: global-setup이 소유자로 DB를 만들고 마이그레이션한 뒤, 테스트에는 같은 DB의 앱 role 주소를 준다. 그래서 앱 코드가 DML만으로 도는지 테스트마다 확인한다.
-  - 소유자 주소를 따로 받는 것: 실행 계획 테스트(`ANALYZE`), 권한 테스트.
+  - 소유자 주소를 따로 받는 것: 실행 계획 테스트(`ANALYZE`), 권한 테스트, 실행기 테스트, 부하 템플릿 확인 테스트. CI가 이 목록을 확인한다.
+  - E2E의 API는 소유자 주소를 지우고 띄운다. Playwright가 준비와 API에 같은 환경 변수를 주기 때문이다.
   - 잠금을 기다리는지 보는 `pg_stat_activity` 조회(테스트 10곳)는 앱 role 그대로 둔다.
 - **비밀번호**: 사용자 서버의 슈퍼유저 비밀번호는 앱 role 만들기에만 쓴다. 도구에는 명령줄 인자가 아니라 `PGPASSWORD`로 넘기고, 출력하지 않는다.
 
@@ -962,7 +963,7 @@ seat-booking/
 
 91. 사용자 서버의 role은 둘이다. 소유자 `seat_booking`(지금 role 그대로, `CREATEDB`)과 앱 `seat_booking_app`(DML만)이다. 슈퍼유저가 앱 role을 만들고 `GRANT seat_booking_app TO seat_booking`을 한다. 이것이 없으면 소유자가 앱 연결이 남은 DB를 `DROP DATABASE … WITH (FORCE)`로 지우지 못하고(42501), `pg_stat_activity`로 앱 세션을 보지 못한다. 환경 변수는 `DATABASE_URL`(앱)과 `DATABASE_OWNER_URL`(소유자)의 쌍이다. 서버·관리자 승격·E2E와 부하의 API·부하 표본기는 앱 role, 마이그레이션·시드·DB 만들기·논리 백업은 소유자다. 슈퍼유저 비밀번호는 앱 role 만들기에만 쓰고 `PGPASSWORD`로 넘긴다. (AI 판단, 리뷰 반영)
 92. 권한은 마이그레이션 0008이 앱 role에 바로 준다: `public`의 `USAGE`, 모든 표의 DML, 소유자가 앞으로 `public`에 만드는 표에 같은 권한(`ALTER DEFAULT PRIVILEGES IN SCHEMA public`). 시퀀스 권한은 주지 않는다(모든 id가 identity 열이고, identity `INSERT`는 시퀀스 권한을 보지 않는다). 마이그레이션을 돌리는 모든 환경에 앱 role이 먼저 있어야 한다. 그룹 role은 두지 않는다(앱 로그인이 하나뿐). 앱 role에게 DDL·`TRUNCATE`·role GRANT는 42501이고, 표의 GRANT·`ANALYZE`·`VACUUM`은 경고만 내고 아무것도 바꾸지 못한다. 임시 표와 `LOCK TABLE`은 된다. (AI 판단, 리뷰 반영)
-93. 테스트는 앱 role로 돈다. global-setup이 소유자로 DB를 만들고 마이그레이션한 뒤 앱 role 주소를 준다. 소유자 주소는 실행 계획 테스트(`ANALYZE`)와 권한 테스트만 받는다. 테스트는 오류 메시지가 아니라 코드로 본다(로컬은 한국어, CI는 영어). (AI 판단)
+93. 테스트는 앱 role로 돈다. global-setup이 소유자로 DB를 만들고 마이그레이션한 뒤 앱 role 주소를 준다. 소유자 주소는 실행 계획 테스트(`ANALYZE`), 권한 테스트, 실행기·부하 템플릿 확인 테스트만 받는다(CI가 목록을 확인한다). 테스트는 오류 메시지가 아니라 코드로 본다(로컬은 한국어, CI는 영어). (AI 판단)
 94. 마이그레이션 실행기를 직접 둔다. drizzle migrator는 전부를 한 트랜잭션에서 돌려 `CONCURRENTLY`를 쓸 수 없고, 하나가 실패하면 앞의 것까지 되돌아가며, 하나만 다시 할 수 없다. drizzle의 파일·journal·적용 기록 표·남은 것을 고르는 규칙은 그대로 따른다. 거기에 journal과 기록이 어긋나면(마지막 기록보다 작은 `when`이 기록 없이 있으면) 실패하는 검사를 더한다. hash로는 아무것도 정하지 않는다(줄바꿈에 따라 달라진다). 연결 하나로 하고, 그 연결의 role이 DB 소유자이며 슈퍼유저가 아닌지 먼저 본다. 세션 advisory lock은 `pg_try_advisory_lock`을 다시 물어 잡는다(막혀 기다리면 그 스냅샷 때문에 `CONCURRENTLY`와 교착). 마이그레이션마다 트랜잭션을 하나씩 두고, 세션에 `lock_timeout = '1s'`를 건다. 앱 쓰기의 잠금 한도(3초)보다 짧아야 그 뒤에 줄 선 앱 쓰기가 자기 한도에 닿지 않는다. `CONCURRENTLY` 문장만 한도 없이 기다린다(쓰기와 부딪히지 않아 잠금 줄을 만들지 않는다). 55P03·40P01이면 2·4·8초를 쉬고 세 번까지 다시 한다. 연결이 끊겨도 프로세스를 죽이지 않고 그 오류를 낸다. (AI 판단, 리뷰 반영)
 95. 파일 첫 줄이 `-- 트랜잭션 밖`인 마이그레이션은 트랜잭션 없이 문장을 하나씩 보내고, 다시 할 때는 파일 처음부터 한다. 모든 문장은 다시 해도 같은 결과여야 한다. `CREATE INDEX CONCURRENTLY`는 `DROP INDEX CONCURRENTLY IF EXISTS` 다음에 쓰고, `IF NOT EXISTS`는 쓰지 않는다(실패로 남은 INVALID 인덱스를 건너뛴다). 실행기는 트랜잭션 밖 마이그레이션마다 INVALID 인덱스(남이 만드는 중인 것은 뺌)를 보고, 있으면 기록하지 않고 지울 문장을 내고 실패한다. DB에 손대기 전에, 표시 없는 파일에 `CONCURRENTLY`가 있거나 표시 있는 파일의 한 조각에 문장이 둘이면 거절한다. `schema.ts`에는 보통 `index()`로 두고 생성된 SQL을 손으로 고친다. (AI 판단, 리뷰 반영)
 96. 무중단 마이그레이션 예시는 둘이다. 하나는 `holds(performance_id)`를 `CONCURRENTLY`로 만드는 것이다(관리자 판매 현황, 10장 65). 다른 하나는 `orders.paid_at`(결제 확정 시각)을 expand → contract로 더하는 것이다: nullable 열 → 앱이 씀 → 옛 paid 주문을 1,000행씩 채우는 명령 → `CHECK … NOT VALID` → `VALIDATE` → 읽기(`OrderView`·내 예매의 `paidAt`). 지금은 paid가 끝 상태라 `updated_at`과 같은데, 그것은 우연한 일치다. 운영 예시로 고른 것이다. 막는 것과 막지 않는 것의 근거는 결정적인 잠금 시험(대기 시간과 오류 코드)으로 남긴다. 큰 표의 인덱스도 0.1초대라 부하 중 1초 지표로는 구별되지 않기 때문이다. 부하 중 리허설은 탐색 한 번의 참고 숫자다. (AI 판단, 리뷰 반영)

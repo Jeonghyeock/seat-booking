@@ -26,7 +26,15 @@ import {
   summarizeK6,
 } from "./report.js";
 import { snapshotStats, type StatsSnapshot, startActivitySampler } from "./samplers.js";
-import { cloneLoadDatabase, LOAD_DATABASE, readLoadData, RESULTS_DIR, setSalesOpen, verifyTemplateFiles } from "./template.js";
+import {
+  cloneLoadDatabase,
+  LOAD_DATABASE,
+  readLoadData,
+  RESULTS_DIR,
+  setSalesOpen,
+  verifyTemplateFiles,
+  verifyTemplateMigrations,
+} from "./template.js";
 
 // 부하 측정 한 번(DESIGN 6.6). 템플릿 복제 → API 띄우기(IPC, P코어) → 표본기 → k6(E코어) → (S1이면) 조용해질 때까지 기다리기
 // → API 닫기 → 요약과 C2 판정을 load/results/runs/<시각>-<이름>/에 쓴다. 중간에 실패해도 자식 프로세스를 정리하고 보고서를 남긴다.
@@ -164,7 +172,7 @@ let after: StatsSnapshot | null = null;
 let baseline: Phase | null = null;
 
 try {
-  await cloneLoadDatabase(ownerUrl);
+  await verifyTemplateMigrations(await cloneLoadDatabase(ownerUrl));
   const loadUrl = withDatabase(baseUrl, LOAD_DATABASE);
   // 이 작업 트리의 load/results 파일이 서버의 템플릿과 같은 것에서 나왔는지 본다.
   const cookies = JSON.parse(readFileSync(path.join(resultsDir, "cookies.json"), "utf8")) as string[];
