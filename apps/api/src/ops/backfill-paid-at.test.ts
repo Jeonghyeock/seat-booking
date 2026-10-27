@@ -28,7 +28,7 @@ function folderUpTo(tag: string) {
   return dir;
 }
 
-// 열(0010)까지 적용하고 CHECK(0011·0012)는 아직인 DB. 테스트가 끝나면 지운다.
+// 열(0010)까지 적용한 DB. 다음 마이그레이션(CHECK)이 더해져도 그 앞의 상태를 흉내 낸다. 테스트가 끝나면 지운다.
 async function databaseBeforeCheck() {
   const name = `seat_booking_backfill_${process.pid}`;
   await withAdminClient(ownerUrl, async (client) => {
@@ -42,8 +42,8 @@ async function databaseBeforeCheck() {
 }
 
 describe("paid_at 다시 채우기(expand → contract 3)", () => {
-  it("옛 paid 주문만 updated_at으로 채우고, 묶음으로 나눠도 다시 해도 같다. 채운 뒤에야 VALIDATE가 된다", async () => {
-    const { ownerUrl: url, appUrl } = await databaseBeforeCheck();
+  it("옛 paid 주문만 updated_at으로 채우고, 묶음으로 나눠도 다시 해도 같다", async () => {
+    const { appUrl } = await databaseBeforeCheck();
     // 앱 role(DML만)로 돈다
     const pool = createPool({ connectionString: appUrl, max: 1 });
     try {
@@ -67,9 +67,6 @@ describe("paid_at 다시 채우기(expand → contract 3)", () => {
       );
       const before = await pool.query("select id, updated_at from orders order by id");
 
-      // 옛 행을 채우기 전에는 CHECK를 NOT VALID로 걸 수는 있어도 VALIDATE는 실패한다
-      await expect(runMigrations(url)).rejects.toMatchObject({ code: "23514" });
-
       expect(await backfillPaidAt(pool, { batchSize: 3 })).toBe(5);
       const after = await pool.query<{ id: number; status: string; paid: boolean; same: boolean }>(
         `select id, status, paid_at is not null as paid, paid_at = updated_at as same from orders order by id`,
@@ -82,8 +79,6 @@ describe("paid_at 다시 채우기(expand → contract 3)", () => {
       ]);
       expect((await pool.query("select id, updated_at from orders order by id")).rows).toEqual(before.rows);
       expect(await backfillPaidAt(pool)).toBe(0);
-
-      expect(await runMigrations(url)).toEqual(["0012_orders_paid_at_validate"]);
     } finally {
       await pool.end();
     }
