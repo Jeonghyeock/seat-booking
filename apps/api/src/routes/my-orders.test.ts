@@ -131,6 +131,8 @@ describe("내 예매(GET /orders)", () => {
       [paid.orderId, "paid", null],
       [pending.orderId, "pending", null],
     ]);
+    // 결제 확정 시각은 paid 주문에만 있다
+    expect(orders.filter((o) => o.paidAt !== null).map((o) => o.orderId)).toEqual([paidDuplicate.orderId, paid.orderId]);
 
     const first = orders.find((o) => o.orderId === refunding.orderId)!;
     expect(first).toMatchObject({ performanceId: refunding.performanceId, amount: refunding.amount, seatCount: 1 });

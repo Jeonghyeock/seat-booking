@@ -78,6 +78,20 @@
       "when": 1793069171747,
       "tag": "0010_orders_paid_at",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1793069229810,
+      "tag": "0011_orders_paid_at_check",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1793069231393,
+      "tag": "0012_orders_paid_at_validate",
+      "breakpoints": true
     }
   ]
 }
