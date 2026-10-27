@@ -204,9 +204,6 @@ export const OrderView = z.object({
   performanceId: z.number().int().positive(),
   status: OrderStatus,
   cancelReason: z.enum(["user", "expired"]).nullable(),
-  // 결제 확정 시각(paid일 때, 7단계). 멱등 키에 저장된 그 전의 응답(주문 생성 201)은 그대로 다시 나가므로 이 필드가 없을 수 있다.
-  // 필수로 두면 그 응답이 응답 스키마에 걸려 500이 된다(API의 expand → contract, DESIGN 6.7).
-  paidAt: z.iso.datetime({ offset: true }).nullable().optional(),
   amount: z.number().int().nonnegative(),
   items: z.array(
     z.object({
@@ -254,8 +251,6 @@ export const MyOrder = OrderStatusInput.extend({
   performance: PerformanceSummary,
   seatCount: z.number().int().nonnegative(),
   createdAt: z.iso.datetime({ offset: true }),
-  // 결제 확정 시각(paid일 때). 목록은 저장해 두었다 다시 주지 않으므로 늘 있다.
-  paidAt: z.iso.datetime({ offset: true }).nullable(),
 });
 export type MyOrder = z.infer<typeof MyOrder>;
 export const MyOrders = z.object({
