@@ -1,5 +1,6 @@
 import type { PaymentAccepted, PaymentScenario, PaymentStatus } from "@seat-booking/shared";
 import { and, eq, isNull, ne, sql } from "drizzle-orm";
+import type { PgUpdateSetSource } from "drizzle-orm/pg-core";
 import type { FastifyBaseLogger } from "fastify";
 import { type Db, type Tx, writeTransaction } from "./db/client.js";
 import { holds, orders, payments, paymentWebhooks, tickets } from "./db/schema.js";
@@ -224,7 +225,7 @@ async function setPaymentStatus(tx: Tx, event: PaymentEvent, from: PaymentStatus
 }
 
 // 주문을 pending일 때만 바꾼다. 확정은 주문 행을 쥐고 pending을 확인했으므로 0행이면 던져서 되돌린다.
-async function setOrderFromPending(tx: Tx, orderId: number, values: Partial<typeof orders.$inferInsert>) {
+async function setOrderFromPending(tx: Tx, orderId: number, values: PgUpdateSetSource<typeof orders>) {
   const changed = await tx
     .update(orders)
     .set({ ...values, updatedAt: sql`now()` })
@@ -279,7 +280,8 @@ async function confirmPayment(tx: Tx, orderId: number, event: PaymentEvent, log:
     update performance_seats set status = 'sold'
      where performance_id = ${performanceId} and seat_id = any(${sql.param(seatIds)}::bigint[])
   `);
-  await setOrderFromPending(tx, orderId, { status: "paid" });
+  // 결제 확정 시각은 updated_at과 같은 트랜잭션 시각이다(expand → contract 2, DESIGN 6.7).
+  await setOrderFromPending(tx, orderId, { status: "paid", paidAt: sql`now()` });
   await setPaymentStatus(tx, event, "requested", "succeeded");
   await tx.insert(tickets).values(seatIds.map((seatId) => ({ orderId, performanceId, seatId })));
 }

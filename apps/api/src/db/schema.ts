@@ -122,8 +122,13 @@ export const holds = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  // 1인 한도를 셀 때 "이 사용자가 이 회차에 만든 선점"을 찾는다.
-  (t) => [index("holds_user_performance_idx").on(t.userId, t.performanceId)],
+  (t) => [
+    // 1인 한도를 셀 때 "이 사용자가 이 회차에 만든 선점"을 찾는다.
+    index("holds_user_performance_idx").on(t.userId, t.performanceId),
+    // 관리자 판매 현황이 회차의 선점(그 주문·결제)을 찾는다(DESIGN 10장 65). 마이그레이션은 CONCURRENTLY로 손으로 고쳤다(6.7).
+    // 여기에 .concurrently()를 두지 않는다. 나중에 빼면 drizzle-kit이 보통 CREATE INDEX로 다시 만드는 SQL을 낸다.
+    index("holds_performance_idx").on(t.performanceId),
+  ],
 );
 
 export const SEAT_STATUSES = ["available", "held", "sold"] as const;
@@ -183,6 +188,8 @@ export const orders = pgTable(
     cancelReason: text("cancel_reason", { enum: CANCEL_REASONS }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    // 결제 확정 시각. updated_at은 행이 바뀔 때마다 덮여 이 뜻을 지키지 못한다(DESIGN 6.7 무중단 마이그레이션 예시 2).
+    paidAt: timestamp("paid_at", { withTimezone: true }),
   },
   (t) => [
     check("orders_status_valid", sql`${t.status} in ('pending', 'paid', 'cancelled')`),
@@ -190,6 +197,8 @@ export const orders = pgTable(
     check("orders_cancel_reason_valid", sql`${t.cancelReason} in ('user', 'expired')`),
     // 취소된 주문에만 이유가 있다.
     check("orders_cancel_reason_matches_status", sql`(${t.status} = 'cancelled') = (${t.cancelReason} is not null)`),
+    // paid 주문에는 결제 확정 시각이 있다. NOT VALID로 걸고 옛 행을 채운 뒤 VALIDATE했다(마이그레이션 0011·0012, DESIGN 6.7).
+    check("orders_paid_at_set", sql`${t.status} <> 'paid' or ${t.paidAt} is not null`),
     // 정리 작업이 선점이 만료된 pending 주문을 찾는다(DESIGN 6.2 정리 2).
     index("orders_pending_hold_idx").on(t.holdId).where(sql`${t.status} = 'pending'`),
     // 내 예매(GET /orders)가 내 주문을 최근 것부터 찾는다(DESIGN 6.5).

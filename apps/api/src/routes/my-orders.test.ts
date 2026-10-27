@@ -74,7 +74,7 @@ describe("내 예매(GET /orders)", () => {
   });
 
   const markPaid = async (order: OrderView) => {
-    await pool.query("update orders set status = 'paid' where id = $1", [order.orderId]);
+    await pool.query("update orders set status = 'paid', paid_at = now() where id = $1", [order.orderId]);
     await pool.query("update performance_seats set status = 'sold' where hold_id = $1", [order.holdId]);
     await insertPayment(order.orderId, "succeeded", order.amount);
   };
@@ -131,6 +131,8 @@ describe("내 예매(GET /orders)", () => {
       [paid.orderId, "paid", null],
       [pending.orderId, "pending", null],
     ]);
+    // 결제 확정 시각은 paid 주문에만 있다
+    expect(orders.filter((o) => o.paidAt !== null).map((o) => o.orderId)).toEqual([paidDuplicate.orderId, paid.orderId]);
 
     const first = orders.find((o) => o.orderId === refunding.orderId)!;
     expect(first).toMatchObject({ performanceId: refunding.performanceId, amount: refunding.amount, seatCount: 1 });
@@ -167,7 +169,7 @@ describe("내 예매(GET /orders)", () => {
          insert into holds (user_id, performance_id, expires_at)
          select $1, $2, now() + interval '5 minutes' from generate_series(1, $3) returning id
        )
-       insert into orders (user_id, hold_id, status, amount) select $1, id, 'paid', 1000 from h`,
+       insert into orders (user_id, hold_id, status, amount, paid_at) select $1, id, 'paid', 1000, now() from h`,
       [many, performanceId, MY_ORDERS_PAGE_SIZE + 1],
     );
     const { orders, hasMore } = await myOrders(many!);

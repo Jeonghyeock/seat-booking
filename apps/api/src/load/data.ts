@@ -208,11 +208,13 @@ export async function seedLoadData(
     // 만료 취소는 선점 만료(c+5분) 뒤 정리 작업이 한다.
     await q(
       `with ins as (
-         insert into orders (user_id, hold_id, status, amount, cancel_reason, created_at, updated_at)
+         insert into orders (user_id, hold_id, status, amount, cancel_reason, created_at, updated_at, paid_at)
          select pl.user_id, pl.hold_id, pl.status, a.amount, pl.cancel_reason, pl.created_at,
                 pl.created_at + case pl.cancel_reason when 'user' then interval '2 minutes'
                                                       when 'expired' then interval '5 minutes 5 seconds'
-                                                      else interval '1 minute' end
+                                                      else interval '1 minute' end,
+                -- paid는 1분 뒤에 확정됐다(updated_at과 같다). paid 주문에는 확정 시각이 있어야 한다(orders_paid_at_set).
+                case when pl.status = 'paid' then pl.created_at + interval '1 minute' end
            from load_plan pl join (select o, sum(price)::int as amount from load_plan_seats group by o) a using (o)
           order by pl.o
          returning id, hold_id)

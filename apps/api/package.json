@@ -14,7 +14,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "load:template": "tsx --env-file-if-exists=../../.env src/load/template-cli.ts",
-    "load:run": "tsx --env-file-if-exists=../../.env src/load/run-cli.ts"
+    "load:run": "tsx --env-file-if-exists=../../.env src/load/run-cli.ts",
+    "ops:backfill-paid-at": "tsx --env-file-if-exists=../../.env src/ops/backfill-paid-at-cli.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.3",
