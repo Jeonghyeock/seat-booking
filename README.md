@@ -2,7 +2,7 @@
 
 공연 좌석 예매 서비스. 예매가 열리는 순간 많은 사람이 같은 좌석을 동시에 눌러도 한 좌석은 한 번만 팔리고, 결제하지 않은 선점은 시간이 지나면 풀리고, 같은 요청이 두 번 와도 한 번만 처리되게 만든다. 백엔드와 PostgreSQL을 직접 운영하는 것이 목적이다.
 
-> 진행 중(6단계 완료 — 부하 측정과 개선: 병목은 Node 한 스레드, 좌석 지도 JSON을 DB가 만들어 꺾이는 점 초당 250 → 약 1,000건. 다음은 7단계 — 운영). 설계: [docs/DESIGN.md](docs/DESIGN.md) · 진행 기록: [docs/PROGRESS.md](docs/PROGRESS.md) · 부하 측정 결과: [load/RESULTS.md](load/RESULTS.md)
+> 7단계까지 완료(마지막 7단계 — 운영: 앱 role은 DML만, 잠금 대기를 1초로 묶는 마이그레이션 실행기와 배포 단위의 expand → contract, 백업을 다른 DB와 리허설 클러스터로 복구해 대조). 설계: [docs/DESIGN.md](docs/DESIGN.md) · 진행 기록: [docs/PROGRESS.md](docs/PROGRESS.md) · 부하 측정 결과: [load/RESULTS.md](load/RESULTS.md) · 운영: [docs/OPERATIONS.md](docs/OPERATIONS.md)
 
 > Claude Code와 함께 만든다.
 
