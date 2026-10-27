@@ -630,81 +630,152 @@ bus-review에서는 Supabase가 대신 해 줬던 부분을 직접 만든다. 3�
 **목표.** 8장 완료 기준은 C8(다른 DB로 복구하고 행 수를 대조한 기록)과 운영 문서다. 설명할 것은 "백업에서 무엇을 잃을 수 있나"와 "왜 앱 계정에서 DDL 권한을 빼나"다. 1장의 주장은 "PostgreSQL을 운영했다: 마이그레이션, 권한 분리, 백업·복구"다.
 
 **이 PC라는 조건.**
-- 사용자 PC의 PostgreSQL 서비스는 다시 띄우지 않고 설정도 바꾸지 않는다. 관리자 권한이 들고, `ALTER SYSTEM`도 쓰지 않는다.
-- 그래서 WAL 보관(`archive_mode`, 서비스를 다시 띄워야 켜짐)은 켤 수 없다. 시점 복구는 `pg_receivewal`(복제 연결로 WAL을 받아 두는 도구)로 대신한다.
-- 지금 서버는 `wal_level = replica`, `max_wal_senders = 10`이고, `pg_hba.conf`가 127.0.0.1의 복제 연결을 scram으로 받는다(읽어서 확인함).
-- 복구는 같은 서버의 다른 DB(논리 백업)나, scratch 디렉터리의 임시 인스턴스(물리 백업, 다른 포트)로 한다.
+- 사용자 PC의 PostgreSQL 서비스는 다시 띄우지 않고 설정도 바꾸지 않는다. 관리자 권한이 들고, `ALTER SYSTEM`도 쓰지 않는다. 그래서 그 서버에는 WAL 보관(`archive_mode`, 다시 띄워야 켜짐)을 켤 수 없다.
+- 논리 백업은 그 서버에서 한다. 다른 DB로 복구하고 대조한다(C8).
+- 물리 백업과 시점 복구는 리허설 클러스터에서 한다.
+  - 리허설 클러스터: `initdb`로 저장소 밖 작업 디렉터리에 만들고, 다른 포트에서 127.0.0.1만 듣게 띄운다. 끝에 멈추고 지운다.
+  - 데이터는 논리 백업을 복구해 같은 것을 싣는다.
+  - 이유: 물리 백업에는 `REPLICATION` 권한이 필요하다. 그 권한은 클러스터의 모든 파일(다른 DB, `pg_authid`의 비밀번호 해시, 설정 파일)을 읽는다(리뷰 실험). 사용자 서버에 그런 role을 두지 않는다. 슈퍼유저 비밀번호도 물리 백업에는 쓰지 않게 된다.
+  - WAL은 `pg_receivewal`(복제 연결로 WAL을 받아 두는 도구)로 받는다. 서버를 다시 띄우지 않아도 되는 방법이라 사용자 서버에도 그대로 쓸 수 있다. 리허설 클러스터에서도 `archive_mode`는 켜지 않는다.
 
 **role 나누기.**
 
 | role | 가진 것 | 쓰는 곳 |
 |---|---|---|
 | `seat_booking`(소유자, 지금 role 그대로) | DB와 표의 소유, `CREATEDB` | 마이그레이션, 시드, 테스트·E2E·부하 DB 만들기, 논리 백업 |
-| `seat_booking_app`(새로) | `LOGIN`. 스키마 `USAGE`, 표의 `SELECT·INSERT·UPDATE·DELETE`, 시퀀스의 `USAGE·SELECT`만 | 서버(`main.ts`), 관리자 승격 명령(`admin:promote`), 테스트가 부르는 앱 코드 |
-| `seat_booking_backup`(새로, 로컬 리허설만) | `LOGIN REPLICATION`, `pg_read_all_data` | 물리 백업, WAL 받기 |
+| `seat_booking_app`(새로) | `LOGIN`. 스키마 `public`의 `USAGE`, 표의 `SELECT·INSERT·UPDATE·DELETE`만 | 서버(`main.ts`), 관리자 승격 명령(`admin:promote`), 테스트가 부르는 앱 코드, 부하 표본기 |
+| `seat_booking_backup`(리허설 클러스터에만) | `LOGIN REPLICATION`만 | 물리 백업, WAL 받기. 표는 읽지 못한다(리뷰 실험) |
 
+- **role 만들기**: 슈퍼유저가 한 번 한다(클러스터에 하나). 방법은 README와 CI 두 job에 둔다.
+  - `CREATE ROLE seat_booking_app LOGIN PASSWORD …`
+  - `GRANT seat_booking_app TO seat_booking`: 소유자가 앱 연결을 보고 끊을 수 있게 한다.
+    - 없으면 앱 연결이 남은 DB의 `DROP DATABASE … WITH (FORCE)`가 42501이다(리뷰 실험). 테스트·E2E·부하 DB를 지울 때 걸린다.
+    - 소유자의 `pg_stat_activity`도 앱 세션의 `state`·`query`를 못 본다.
 - **환경 변수**: `DATABASE_URL`은 앱 role, `DATABASE_OWNER_URL`은 소유자다. 다른 DB(테스트, E2E, 부하)도 같은 쌍을 `withDatabase`로 만든다.
-  - 서버, `admin:promote`, E2E의 API, 부하 실행기의 API는 앱 role로 접속한다.
-  - 마이그레이션, 시드, E2E 준비, 테스트 준비, 부하 템플릿·복제는 소유자로 접속한다.
-- **권한은 마이그레이션 0008이 준다**: 스키마 `USAGE`, 지금 있는 모든 표와 시퀀스의 권한, 그리고 소유자가 앞으로 만드는 표·시퀀스에도 같은 권한이 붙게 하는 `ALTER DEFAULT PRIVILEGES`.
-  - 기본 권한은 DB마다 있고, 그것을 실행한 role(소유자)이 만드는 것에 걸린다. 템플릿 복제(`CREATE DATABASE … TEMPLATE`)가 함께 옮긴다.
-  - 그래서 마이그레이션을 돌리는 모든 곳(로컬, 테스트, E2E, 부하 템플릿, CI)에 앱 role이 먼저 있어야 한다. role은 클러스터에 하나라 한 번만 만든다. 슈퍼유저가 만들고, 방법은 README와 CI에 둔다.
-- **앱 role이 못 하는 것**: DDL(`CREATE`·`ALTER`·`DROP`), `TRUNCATE`, 권한 주기, 소유자만 되는 일(`ANALYZE`, `VACUUM`).
-  - 테스트가 다음을 확인한다: DDL·`TRUNCATE`·권한 주기가 42501로 실패한다. `ANALYZE`·`VACUUM`은 오류 없이 경고만 내고 건너뛴다(통계가 바뀌지 않는 것을 본다). DML은 되고, identity 열 `INSERT`도 된다. 뒤 마이그레이션이 만든 표에도 권한이 붙는다.
-- **테스트는 앱 role로 돈다**: global-setup이 소유자로 DB를 만들고 마이그레이션한 뒤, 테스트에는 같은 DB의 앱 role 주소를 준다. 그래서 앱 코드가 DML만으로 도는지 테스트마다 확인한다. 소유자가 필요한 몇 테스트(실행 계획 테스트의 `ANALYZE` 등)는 소유자 주소를 따로 받는다.
-- **비밀번호**: 슈퍼유저 비밀번호는 role 만들기와 물리 백업 리허설에만 쓴다. 도구에는 명령줄 인자가 아니라 `PGPASSWORD`로 넘기고, 출력하지 않는다.
+  - 앱 role로 접속하는 것: 서버, `admin:promote`, E2E의 API, 부하 실행기의 API와 표본기(`pg_stat_activity`는 같은 role의 세션만 자세히 보인다).
+  - 소유자로 접속하는 것: 마이그레이션, 시드(`TRUNCATE`), E2E 준비, 테스트 준비, 부하 템플릿·복제.
+  - CI가 `DATABASE_OWNER_URL`을 읽는 파일이 이 목록뿐인지 본다(지금의 `X-User-Id` 검사처럼).
+- **권한은 마이그레이션 0008이 준다**: 스키마 `public`의 `USAGE`, 지금 있는 모든 표의 DML, 그리고 소유자가 앞으로 `public`에 만드는 표에도 같은 권한이 붙게 하는 `ALTER DEFAULT PRIVILEGES IN SCHEMA public`.
+  - 시퀀스 권한은 주지 않는다. 모든 id가 identity 열이고, identity 열 `INSERT`는 시퀀스 권한을 보지 않는다(리뷰 실험). `serial`이나 `nextval`을 쓰게 되면 그때 준다.
+  - 기본 권한은 DB마다 있고, 그것을 실행한 role이 만드는 것에 걸린다. 템플릿 복제(`CREATE DATABASE … TEMPLATE`)가 함께 옮긴다(리뷰 실험: `WAL_LOG`, `FILE_COPY` 둘 다).
+  - 그래서 실행기는 DB 소유자(슈퍼유저가 아닌)로만 돈다. 슈퍼유저가 돌리면 표의 주인과 기본 권한이 슈퍼유저에게 가서, 소유자가 뒤에 만든 표에 앱 권한이 없고 소유자는 표를 고치지 못한다.
+  - 마이그레이션에 앱 role 이름이 들어가므로, 마이그레이션을 돌리는 모든 곳(로컬, 테스트, E2E, 부하 템플릿, CI)에 앱 role이 먼저 있어야 한다. 없으면 0008이 42704로 실패하고 되돌아간다.
+  - 그룹 role(NOLOGIN)을 두지 않고 앱 role에 바로 준다. 클러스터 하나에 앱 로그인이 하나뿐이다. 같은 권한이 필요한 로그인이 둘이 되거나 환경마다 이름이 달라지면 마이그레이션 하나로 옮긴다.
+- **앱 role이 못 하는 것과 하는 것**(리뷰 실험)
+  - 42501로 실패한다: `CREATE`(표, 인덱스, 스키마, 함수), `ALTER`, `DROP`, `TRUNCATE`, role GRANT, `SET ROLE seat_booking`, `drizzle` 스키마(적용 기록) 읽기.
+  - 오류 없이 아무것도 바꾸지 못한다
+    - 표의 `GRANT`·`REVOKE`: 경고(01007·01006)만 내고, 권한(`relacl`)이 그대로다.
+    - `ANALYZE`·`VACUUM`: 표마다 경고(01000)만 내고 건너뛴다. 테스트는 `pg_stat_user_tables.analyze_count`가 그대로인지 본다.
+  - 된다
+    - DML, identity 열 `INSERT`
+    - 임시 표(`PUBLIC`의 `TEMPORARY`, 부하 데이터 테스트가 쓴다)
+    - `LOCK TABLE`(UPDATE·DELETE 권한으로 된다. 앱 role도 표를 얼릴 수 있다. 테스트 둘이 쓴다)
+  - 테스트는 메시지 글자가 아니라 `code`와 notice의 `code`·`severity`로 본다. 로컬 서버는 한국어, CI는 영어로 낸다.
+- **테스트는 앱 role로 돈다**: global-setup이 소유자로 DB를 만들고 마이그레이션한 뒤, 테스트에는 같은 DB의 앱 role 주소를 준다. 그래서 앱 코드가 DML만으로 도는지 테스트마다 확인한다.
+  - 소유자 주소를 따로 받는 것: 실행 계획 테스트(`ANALYZE`), 권한 테스트.
+  - 잠금을 기다리는지 보는 `pg_stat_activity` 조회(테스트 10곳)는 앱 role 그대로 둔다.
+- **비밀번호**: 사용자 서버의 슈퍼유저 비밀번호는 앱 role 만들기에만 쓴다. 도구에는 명령줄 인자가 아니라 `PGPASSWORD`로 넘기고, 출력하지 않는다.
 
-**마이그레이션 실행기.** drizzle의 migrator는 남은 마이그레이션 전부를 한 트랜잭션에서 돌린다. 그러면 `CREATE INDEX CONCURRENTLY`를 쓸 수 없고(트랜잭션 안에서 거부된다), 잠금을 기다리는 한도도 줄 수 없다. 그래서 실행기를 직접 둔다.
-- 마이그레이션 파일과 journal(`drizzle-kit generate`가 만든 것)은 그대로 쓴다.
-  - 적용 기록 표(`drizzle.__drizzle_migrations`의 hash·created_at)와 남은 것을 고르는 규칙(created_at이 마지막 기록보다 큰 것)도 drizzle과 같다.
+**마이그레이션 실행기.** drizzle의 migrator는 남은 마이그레이션 전부를 한 트랜잭션에서 돌린다. 그래서 세 가지가 안 된다. `CREATE INDEX CONCURRENTLY`를 쓸 수 없다(트랜잭션 안에서 25001로 거부된다). 하나가 실패하면 앞의 마이그레이션까지 모두 되돌아간다. 마이그레이션 하나만 다시 할 수 없다. 그래서 실행기를 직접 둔다(`drizzle-kit migrate`·`push`는 쓰지 않는다).
+- **drizzle과 같게 하는 것**(drizzle-orm 0.45 소스)
+  - 파일과 journal(`drizzle-kit generate`가 만든 것)을 그대로 쓴다. journal 순서대로 읽고, `--> statement-breakpoint`로 나눈다.
+  - 적용 기록 표: `drizzle` 스키마와 `__drizzle_migrations(id serial, hash text, created_at bigint)`를 같은 DDL로 만든다. 기록에는 파일의 sha256과 journal의 `when`을 넣는다(적용 시각이 아니다).
+  - 남은 것을 고르는 규칙: created_at이 가장 큰 기록 한 행을 읽고, `when`이 그보다 큰(엄격히) 항목을 journal 순서대로 돌린다.
   - 그래서 drizzle로 마이그레이션한 개발·E2E·부하 DB를 그대로 이어서 쓴다(테스트).
-- 마이그레이션마다 트랜잭션을 하나씩 둔다(전체를 하나로 묶지 않는다). 실패하면 그 마이그레이션만 되돌리고 멈춘다.
-- **잠금 대기 한도**: 트랜잭션 안에서 `SET LOCAL lock_timeout = '3s'`를 건다. 3초 안에 잠금을 받지 못하면(55P03) 잠깐 뒤 세 번까지 다시 하고, 그래도 안 되면 실패한다.
-  - 이유: 오래 쥔 트랜잭션 뒤에서 `ACCESS EXCLUSIVE`를 기다리면, 그 뒤에 오는 모든 질의가 그 마이그레이션 뒤에 줄을 선다(잠금 줄). 잠깐의 DDL이 서비스 전체를 멈춘다.
-  - 테스트: 다른 연결이 표를 쥔 동안 마이그레이션이 매달리지 않고 빨리 실패한다.
-- **트랜잭션 밖 마이그레이션**: 파일 첫 줄이 `-- 트랜잭션 밖`이면 트랜잭션 없이 문장을 하나씩 보낸다(`--> statement-breakpoint`로 나눈다). 여러 문장을 한 번에 보내면 그것도 암묵적인 트랜잭션이라 `CONCURRENTLY`가 거부된다.
-  - 규칙 1: 모든 문장은 다시 해도 같은 결과여야 한다. 중간에 실패하면 앞 문장은 커밋되고, 기록은 남지 않아 다음에 처음부터 다시 돈다.
-  - 규칙 2: `CREATE INDEX CONCURRENTLY`는 `DROP INDEX CONCURRENTLY IF EXISTS` 다음에 쓴다. `CREATE INDEX CONCURRENTLY IF NOT EXISTS`는 실패로 남은 INVALID 인덱스를 있는 것으로 보고 건너뛰어 쓰지 않는다.
-  - 실행기는 끝에 INVALID 인덱스(`pg_index.indisvalid = false`)가 없는지 본다.
+- **drizzle에 더하는 검사**
+  - 이 규칙은 마지막 한 행만 본다. 브랜치를 합치다 마지막 기록보다 작은 `when`이 생기면 그 마이그레이션을 조용히 영원히 건너뛴다.
+  - 그래서 `when`이 마지막 기록 이하인 항목마다 같은 `when`의 기록이 있어야 하고, journal의 `when`은 늘어나기만 해야 한다. 아니면 DB에 손대기 전에 실패한다.
+  - hash로는 아무것도 정하지 않는다. 파일 줄바꿈(Windows 체크아웃은 CRLF)에 따라 값이 달라진다. drizzle도 쓰기만 한다.
+- **연결 하나**: `pg.Client` 하나로 하고, 끝에 닫은 뒤 돌아온다.
+  - 템플릿 DB에 연결이 남으면 바로 뒤의 복제가 55006이다.
+  - 시작할 때 접속한 role이 DB 소유자이고 슈퍼유저가 아닌지 본다(권한 절). 아니면 거절한다.
+  - 세션 수준 `pg_advisory_lock`을 잡아 실행기 둘이 같은 DB에 끼어들지 않게 한다. 같은 세션의 잠금은 `CONCURRENTLY`가 기다리지 않는다(리뷰 실험).
+- **마이그레이션마다 트랜잭션 하나**: 전체를 하나로 묶지 않는다. 실패하면 그 마이그레이션만 되돌리고 멈춘다. 기록 INSERT도 같은 트랜잭션에 넣는다.
+- **잠금 대기 한도**: 연결 직후 세션에 `SET lock_timeout = '1s'`를 한 번 건다. 그러면 트랜잭션 안과 밖(`CONCURRENTLY`가 기다리는 단계마다) 모두에 걸린다. 트랜잭션 밖에서는 `SET LOCAL`이 경고만 내고 걸리지 않는다(리뷰 실험).
+  - 이유: 오래 쥔 트랜잭션 뒤에서 `ACCESS EXCLUSIVE`를 기다리면, 뒤에 오는 모든 질의가 그 마이그레이션 뒤에 줄을 선다(잠금 줄). 리뷰 실험에서 기다리는 `ALTER` 뒤의 `SELECT`도 막혔다. 잠깐의 DDL이 서비스 전체를 멈춘다.
+  - 1초인 이유: 앱의 쓰기 트랜잭션은 `lock_timeout` 3초다(10장 40). 마이그레이션의 한도가 같으면 그 뒤에 줄 선 앱 쓰기도 자기 한도에 닿아 500이 된다(리뷰 실험: 3초면 줄 선 쓰기가 2,910ms 만에 지나가 90ms 남았고, 1초면 모두 1초 안에 지나갔다).
+  - 55P03(잠금 대기 초과)이나 40P01(교착)이면 다시 한다. 다시 할 때마다 줄이 다시 생기므로, 다시 하기 전에 2초, 4초, 8초를 쉬고 세 번까지 한다. 트랜잭션 마이그레이션은 트랜잭션 전체를, 트랜잭션 밖 마이그레이션은 파일 처음부터 다시 한다. 그 밖의 오류는 멈춘다.
+  - 테스트: 다른 연결이 표를 쥔 동안 마이그레이션이 매달리지 않고 빨리 실패하고, 놓아 주면 다시 해서 된다.
+- **트랜잭션 밖 마이그레이션**: 파일 첫 줄이 `-- 트랜잭션 밖`이면 트랜잭션 없이 문장을 하나씩 보낸다. 첫 줄은 BOM과 `\r`를 지우고 본다. 여러 문장을 한 번에 보내면 그것도 암묵적인 트랜잭션이라 `CONCURRENTLY`가 거부된다.
+  - 규칙 1: 모든 문장은 다시 해도 같은 결과여야 한다. 중간에 실패하면 앞 문장은 커밋되고 기록은 남지 않아, 다음에 처음부터 다시 돈다.
+  - 규칙 2: `CREATE INDEX CONCURRENTLY`는 `DROP INDEX CONCURRENTLY IF EXISTS` 다음에 쓴다. `CREATE INDEX CONCURRENTLY IF NOT EXISTS`는 쓰지 않는다. 실패로 남은 INVALID 인덱스를 있는 것으로 보고 건너뛴다(리뷰 실험).
+  - 실패한 `CONCURRENTLY`는 INVALID 인덱스를 남긴다. 그 인덱스는 계획에는 쓰이지 않으면서 쓰기마다 유지될 수 있고, 유일 인덱스면 새 중복을 막는다(리뷰 실험). 그래서 실행기는 트랜잭션 밖 마이그레이션마다(성공해도 실패해도) `public`의 INVALID 인덱스를 본다. 있으면 그 이름과 지울 문장을 내고 실패한다.
+  - 미리 훑기: DB에 손대기 전에 남은 파일 전부를 보고, 표시가 없는 파일의 주석 아닌 줄에 `CONCURRENTLY`가 있으면 거절한다. 그대로 두면 앞 마이그레이션이 이미 커밋된 뒤에 25001로 멈춘다.
+  - 만드는 법: `drizzle-kit generate`는 `.concurrently()` 인덱스에 표시 없이 `CREATE INDEX CONCURRENTLY "…" ON …;`만 낸다. 그래서 `schema.ts`에는 보통 `index()`로 두고, 생성된 SQL에 표시, `DROP INDEX CONCURRENTLY IF EXISTS`, `CONCURRENTLY`를 손으로 넣는다. `schema.ts`에 `.concurrently()`를 두면, 나중에 그것을 빼기만 해도 drizzle-kit이 인덱스를 지우고 보통 `CREATE INDEX`로 다시 만드는 SQL을 낸다(리뷰 실험).
+  - 같은 DB의 `REPEATABLE READ` 스냅샷(예: `pg_dump`)과 도는 중인 문장이 있으면 `CONCURRENTLY`는 그것이 끝나길 기다린다. 그래서 백업과 겹치지 않는다.
 
 **무중단 마이그레이션 예시.**
 1. **인덱스 `holds(performance_id)`**: 관리자 판매 현황이 회차의 선점을 찾을 때 쓴다(10장 65). `CREATE INDEX CONCURRENTLY`로 쓰기를 막지 않고 만든다.
 2. **열 `orders.paid_at`(결제 확정 시각) 더하기, expand → contract.**
-   - 왜: 지금은 paid 주문의 `updated_at`이 결제 시각과 같다. 하지만 `updated_at`은 행이 바뀔 때마다 덮인다. 결제 뒤 취소가 생기면 결제 시각을 잃는다. 주문 조회(OrderView)와 내 예매에 `paidAt`으로 내보낸다(API만, 화면은 그대로).
+   - 왜: 지금은 paid가 끝 상태라 paid 주문의 `updated_at`이 결제 확정 시각과 같다. 하지만 그것은 우연한 일치다. 이름이 뜻을 말하지 않고, 결제 뒤에 주문 행을 바꾸는 기능이 생기면 조용히 틀린다.
+     - 운영 예시로 고른 것이고, 지금 기능에 꼭 필요해서가 아니다.
+     - 주문 조회(OrderView)와 내 예매에 `paidAt`으로 내보낸다(API만, 화면은 그대로).
    - 순서(단계마다 따로 배포할 수 있게)
-     1. nullable 열을 더한다. 표를 다시 쓰지 않아 잠금이 짧다.
+     1. nullable 열을 더한다. `ACCESS EXCLUSIVE`지만 표를 다시 쓰거나 훑지 않아 짧다. 그래도 잠금 줄을 만들 수 있어 `lock_timeout`이 필요하다.
      2. 앱이 결제 확정 때 쓴다.
-     3. 옛 주문을 1,000행씩 채운다. 값은 그 주문의 succeeded 결제의 `updated_at`이다.
-     4. `CHECK (status <> 'paid' OR paid_at IS NOT NULL) NOT VALID`를 건다. 새로 쓰는 행만 검사하고 잠금이 짧다.
+     3. 옛 paid 주문을 1,000행씩 채운다. 값은 그 주문의 `updated_at`이다(paid가 끝 상태라 확정 시각과 같다). 취소된 주문은 null이다.
+     4. `CHECK (status <> 'paid' OR paid_at IS NOT NULL) NOT VALID`를 건다. 이것도 `ACCESS EXCLUSIVE`지만 옛 행을 훑지 않아 짧다(리뷰 실험).
      5. `VALIDATE CONSTRAINT`로 옛 행을 검사한다. 쓰기를 막지 않는 잠금(`SHARE UPDATE EXCLUSIVE`)이다.
      6. 앱이 읽는다.
-   - 3은 마이그레이션이 아니라 명령(`ops:backfill-paid-at`)이다. 한 트랜잭션에 전부 넣으면 오래 잠그고, 실패하면 되돌릴 것이 크다.
-3. **부하 중 리허설(참고 숫자, 탐색 한 번)**: 6단계 도구로 부하 DB에 S3를 일정 도착률로 보내면서, 마이그레이션을 소유자로 돌린다. API 1초 지표로 그 순간의 p95와 5xx를 본다. 견줄 것은 둘이다.
-   - 큰 표(`performance_seats` 40만 행)에 보통 `CREATE INDEX`와 `CONCURRENTLY`. 보통 것은 만드는 동안 그 표의 쓰기를 막는다.
-   - 오래 쥔 트랜잭션(idle in transaction) 뒤의 `ALTER TABLE ADD COLUMN`을 `lock_timeout`이 있을 때와 없을 때(잠금 줄).
+   - 3은 마이그레이션이 아니라 명령(`ops:backfill-paid-at`)이다. 한 트랜잭션에 전부 넣으면 오래 잠그고, 실패하면 되돌릴 것이 크다. 다시 해도 같은 결과다(`paid_at IS NULL`인 행만 채운다).
+3. **잠금 리허설**: 막는 것과 막지 않는 것의 근거는 결정적인 잠금 시험으로 남긴다. 결과는 대기 시간과 오류 코드다.
+   - 리뷰 실험에서 큰 표(`performance_seats` 40만 행)의 인덱스는 0.1초대에 만들어졌다. 이렇게 짧으면 부하 중 1초 지표로는 보통 `CREATE INDEX`와 `CONCURRENTLY`가 구별되지 않는다.
+   - 시험 A, 인덱스: 보통 `CREATE INDEX`를 열린 트랜잭션 안에 두고(큰 표의 긴 빌드를 흉내 냄) 그 동안 `UPDATE performance_seats`(선점·취소·결제가 쓴다)가 기다리는지 본다. `CONCURRENTLY`가 기다리는 동안에는 같은 `UPDATE`가 바로 되는지 본다.
+   - 시험 B, 잠금 줄: idle in transaction 보유자 뒤에 `ALTER TABLE orders ADD COLUMN`을 둔다. 그 뒤의 앱 쓰기와 읽기가 얼마나 기다리는지, 마이그레이션 `lock_timeout` 없음·1초에서 본다. `orders`는 S3가 반복마다 읽고 쓴다.
+4. **부하 중 리허설(참고 숫자, 탐색 한 번)**: 6단계 도구로 부하 DB에 S3를 일정 도착률로 보내면서 시험 A와 B를 한 번씩 한다. 둘은 동시에 하지 않는다(`CONCURRENTLY`는 같은 DB의 다른 트랜잭션도 기다린다). API 1초 지표와 k6 요청별 기록으로 그 구간의 최댓값과 5xx를 본다.
    - 부하 템플릿은 role을 나눈 뒤 다시 만든다(권한이 DB 안에 있다).
 
 **백업·복구 리허설.**
-1. **논리 백업(C8 판정)**: 조용한 DB(부하 템플릿, 112MB)를 소유자로 `pg_dump -Fc` 하고, 새 DB에 `pg_restore -j`로 복구한다.
-   - 합격: 표마다 행 수와 내용 checksum이 같다. checksum은 `sum(hashtextextended(t::text, 0))`이라 행 순서와 상관없다. identity 시퀀스의 다음 값도 같다.
+1. **논리 백업(C8 판정)**: 부하 템플릿(112MB)을 복제한 조용한 DB를 소유자로 `pg_dump -Fc` 하고, 빈 새 DB에 `pg_restore -j 4`로 복구한다.
+   - 템플릿에서 바로 덤프하지 않는다. 템플릿은 부하 측정의 기준이고(통계·visibility map·토큰 파일이 짝), 연결이 하나라도 있으면 다른 복제가 막힌다. 그래서 순서는 이렇다: 템플릿 연결 0 확인 → 복제 → 복제본 checksum → 덤프 → 복구 → 복구본 checksum과 비교 → 지우기.
+   - 합격: 표마다(`public`과 `drizzle`) 행 수와 내용 checksum이 같고, 시퀀스마다 `last_value`·`is_called`가 같다.
+     - checksum은 `sum(hashtextextended(t::text, 0))`이라 행 순서와 상관없다.
+     - `timestamptz`의 텍스트는 세션의 `TimeZone`·`DateStyle`에 따라 달라진다(리뷰 실험). 그래서 양쪽 모두 `SET timezone = 'UTC'; SET datestyle = 'ISO, YMD'`로 잰다.
    - 잃는 것을 확인한다
-     - 백업을 시작한 뒤의 쓰기는 없다. 백업이 도는 중에 한 행을 넣고 복구본에 없는지 본다.
-     - 통계(`pg_statistic`)는 백업되지 않는다. 복구본의 좌석 지도 실행 계획이 6단계의 "ANALYZE 전"처럼 나오는지 보고, `ANALYZE` 뒤 돌아오는지 본다.
-     - role과 비밀번호는 DB 백업에 없다. 슈퍼유저의 `pg_dumpall --globals-only`로 따로 받는다.
+     - 백업 시작(스냅샷) 뒤의 쓰기는 없다. 우연한 시점에 기대지 않게 하려고, 열어 둔 `REPEATABLE READ` 트랜잭션에서 `pg_export_snapshot()`을 한다. 다른 연결에서 행 하나를 넣고 하나를 고친 뒤 `pg_dump --snapshot`으로 덤프한다. 복구본에 둘 다 없어야 한다.
+     - 시퀀스는 스냅샷을 따르지 않고 덤프하는 순간의 값이다(리뷰 실험). 그래서 시퀀스 비교는 조용한 DB에서만 하고, 위 시험에서는 뺀다.
+     - 통계(`pg_statistic`)는 기본값으로는 덤프에 담기지 않는다. 18부터 `--statistics`로 담을 수 있다. 복구본의 `pg_stats` 행 수(0)와 좌석 지도의 추정 행 수 대 실제를 보고, `ANALYZE` 뒤 돌아오는지 본다. 계획 모양은 같을 수 있다(리뷰 실험).
+     - 복구본은 템플릿의 `autovacuum_enabled = false`를 이어받는다. 운영 DB 복구라면 켜야 한다.
+     - role과 비밀번호는 DB 백업에 없다. 0008 뒤에는 대상 클러스터에 앱 role이 먼저 있어야 한다. 없으면 `pg_restore`가 권한 문장에서 실패한다(데이터는 들어간다). 비밀번호까지 받으려면 슈퍼유저의 `pg_dumpall --globals-only`가 필요하다.
    - 숫자: 덤프 크기, 덤프 시간, 복구 시간(RTO의 한 부분).
-2. **물리 백업과 시점 복구(참고, 시간 제한)**
+2. **물리 백업과 시점 복구(리허설 클러스터, 참고, 시간 제한)**
+   - 준비
+     - 리허설 클러스터를 만들고, 소유자·앱 role을 만든 뒤 논리 백업을 복구한다.
+     - 백업 role(`LOGIN REPLICATION`)을 만든다.
+     - 표시 행 쓰기와 `pg_switch_wal()`은 그 클러스터의 슈퍼유저가 한다.
    - 순서
-     1. `pg_receivewal`(슬롯 없이)로 WAL을 받기 시작한다.
-     2. backup role로 `pg_basebackup`을 받는다.
-     3. 표시 행을 넣고 시각 T를 적은 뒤 `pg_switch_wal()`을 한다(그 구간의 WAL 파일이 닫히게). T 뒤에 또 쓴다.
-     4. 임시 인스턴스(다른 포트, scratch 디렉터리)를 `recovery_target_time = T`로 복구해, T 앞의 쓰기만 있는지 본다.
-     5. `pg_verifybackup`으로 백업 목록(manifest)을 확인한다.
-   - 슬롯은 쓰지 않는다. 지우지 못하면 WAL이 사용자 디스크에 끝없이 쌓인다(`max_slot_wal_keep_size` 기본 -1). 리허설은 몇 분이라 슬롯 없이 받아도 놓칠 일이 거의 없다. 받기를 백업보다 먼저 시작한다.
-   - 임시 인스턴스는 끝에 반드시 멈추고 지운다.
+     1. `pg_receivewal`(영구 슬롯 없이)로 WAL을 받기 시작한다. 받기를 백업보다 먼저 시작해야 빈 구간이 없다.
+     2. 백업 role로 `pg_basebackup -X stream`을 받는다. 바로 `pg_verifybackup`으로 백업 목록(manifest)을 확인한다. 복구에 쓴 디렉터리는 파일이 바뀌어 검증에 실패하므로, 손대지 않은 백업에서 하고 복구는 사본으로 한다.
+     3. 표시 행을 넣고 커밋한 뒤, 따로 `select clock_timestamp()`로 시각 T를 적는다.
+        - 숫자 오프셋(`+09`)을 붙인 그대로 쓴다. 오프셋이 없으면 복구 서버의 TimeZone으로 읽는다.
+        - 표시 행의 트랜잭션 안의 `now()`는 쓰지 않는다. 시작 시각이라 커밋보다 앞이다.
+     4. 1초 넘게 기다려 `pg_switch_wal()`을 하고, T 뒤에 또 쓴 다음 `pg_switch_wal()`을 한 번 더 한다. 마지막 쓰기가 든 WAL 파일이 `.partial` 없이 받아졌는지 본다. `restore_command`는 `.partial`을 찾지 않는다.
+     5. 백업 사본 둘을 복구한다. 하나는 목표 없이(모든 행), 하나는 `recovery_target_time = T`(T 앞의 행만)다. 짝으로 보여야 판정이 된다.
+        - 설정: `recovery_target_action = 'pause'`로 두고 읽기로 조회한 뒤 멈춘다.
+        - 포트와 `listen_addresses`를 늘 덮어쓴다. 백업에 원본의 설정 파일이 들어 있다.
+   - 판정은 `pg_ctl`의 성공이 아니라 로그로 한다. 리뷰 실험에서 아래 두 경우 모두 행을 잃었는데 겉으로는 성공이었다.
+     - WAL이 모자라 로그에 FATAL이 있어도 `pg_ctl -w start`는 성공으로 돌아왔다(hot standby가 연결을 받는 순간).
+     - Windows의 `restore_command`가 틀리면 목표 없는 복구는 백업 시점에서 조용히 끝났다. `copy`에는 백슬래시를 두 번 적은 경로를 써야 하고, 슬래시는 실패한다.
+     - 그래서 이렇게 본다.
+       - 로그에 `recovery stopping before commit`이 있고, `restored log file` 줄 수가 맞는지 본다.
+       - `pg_is_in_recovery()`, `pg_get_wal_replay_pause_state()`를 본다.
+       - 목표가 있는 복구는 WAL이 모자라면 FATAL을 낸다.
+   - 영구 슬롯은 쓰지 않는다. 지우지 못하면 WAL이 끝없이 쌓인다(`max_slot_wal_keep_size` 기본 -1). `pg_basebackup -X stream`의 임시 슬롯은 연결이 끝나면 사라진다.
+   - 슬롯 없이 받을 때 빈 구간은 받기가 끊긴 동안 서버가 WAL을 지울 때만 생긴다. 다시 붙으면 "already been removed"로 드러난다.
+   - 리허설 클러스터와 `pg_receivewal`은 끝에 반드시 멈추고 지운다. 백업 파일에는 비밀번호 해시와 세션 토큰 해시가 있다.
    - 잘 되지 않으면 논리 백업과 RPO 설명만 남긴다.
 3. **잃을 수 있는 것 정리(운영 문서)**
-   - 논리 백업은 마지막 백업 뒤의 모든 쓰기를 잃는다(RPO = 백업 간격). 물리 백업과 WAL은 받지 못한 WAL만 잃는다.
-   - DB 밖의 것: role·비밀번호, 서버 설정(`postgresql.conf`, `pg_hba.conf`), `.env`, 가짜 결제사의 메모리(대사가 맞춘다), 화면 `sessionStorage`의 멱등 키.
+   - 시점: 논리 백업은 스냅샷 뒤의 모든 쓰기를 잃는다(RPO = 백업 간격). 물리 백업과 WAL은 받지 못한 WAL(마지막 `.partial`, 받기의 지연)만 잃는다. 같은 PC·같은 디스크의 백업은 재해용이 아니다.
+   - 되감기는 것
+     - 세션 표: 백업 뒤의 로그아웃과 관리자 강등이 무효가 된다.
+     - 시퀀스: 결제 id가 결제사 쪽 멱등 키다(10장 25). 옛 백업으로 복구하면 새 결제가 결제사가 이미 아는 id를 다시 받아, 결제사가 옛 결제 결과를 돌려준다. 복구 뒤 시퀀스를 넉넉히 앞으로 옮긴다.
+     - 결제: 대사는 DB의 `requested` 결제에서 시작하므로, 복구로 사라진 결제는 대사가 보지 못한다. 결제사 쪽 기록과 대조해야 한다.
+   - DB 백업 밖의 것
+     - role·비밀번호
+     - 서버 설정(`postgresql.conf`, `pg_hba.conf`). 물리 백업에는 들어 있다.
+     - DB 수준 설정과 권한(`ALTER DATABASE … SET`, `pg_dump --create` 없이는 빠진다)
+     - `.env`, 화면 `sessionStorage`의 멱등 키
+     - 누적 통계(`pg_stat_*`), 실행 계획 통계(기본값), visibility map·동결 상태
 
 **운영 문서.** `docs/OPERATIONS.md`에 둔다.
 - role 만들기와 권한
@@ -712,7 +783,7 @@ bus-review에서는 Supabase가 대신 해 줬던 부분을 직접 만든다. 3�
 - 백업·복구 절차와 리허설 숫자
 - 잃을 수 있는 것
 
-**PR 순서.** 설계 → 마이그레이션 실행기 → role 나누기 → 무중단 마이그레이션 예시와 부하 중 리허설 → 백업·복구 리허설(논리 먼저, 물리·시점 복구는 시간 제한) → 기록.
+**PR 순서.** 설계 → 마이그레이션 실행기 → role 나누기 → 무중단 마이그레이션 예시와 잠금·부하 중 리허설 → 백업·복구 리허설(논리 먼저, 물리·시점 복구는 시간 제한) → 기록.
 
 ## 7. 폴더 구조
 
@@ -879,11 +950,11 @@ seat-booking/
 
 7단계에서 정한 것(2026-10-27, 사용자가 같은 방식으로 진행하기로 함):
 
-91. role은 셋이다. 소유자 `seat_booking`(지금 role 그대로, `CREATEDB`), 앱 `seat_booking_app`(DML만), 백업 `seat_booking_backup`(로컬 리허설만, `REPLICATION`과 `pg_read_all_data`). 환경 변수는 `DATABASE_URL`(앱)과 `DATABASE_OWNER_URL`(소유자)의 쌍이다. 서버·관리자 승격·E2E와 부하의 API는 앱 role, 마이그레이션·시드·DB 만들기·논리 백업은 소유자다. 슈퍼유저 비밀번호는 role 만들기와 물리 백업에만 쓰고 `PGPASSWORD`로 넘긴다. (AI 판단)
-92. 권한은 마이그레이션 0008이 준다: 스키마 `USAGE`, 모든 표 DML, 시퀀스 `USAGE·SELECT`, 소유자가 앞으로 만드는 것에 같은 권한(`ALTER DEFAULT PRIVILEGES`). 마이그레이션에 앱 role 이름이 들어가므로, 마이그레이션을 돌리는 모든 환경(로컬, 테스트, E2E, 부하 템플릿, CI)에 앱 role이 먼저 있어야 한다. 앱 role은 DDL·`TRUNCATE`·`ANALYZE`를 못 한다. (AI 판단)
-93. 테스트는 앱 role로 돈다. global-setup이 소유자로 DB를 만들고 마이그레이션한 뒤 앱 role 주소를 준다. 소유자가 필요한 테스트만 소유자 주소를 따로 받는다. (AI 판단)
-94. 마이그레이션 실행기를 직접 둔다. drizzle의 파일·journal·적용 기록 표·남은 것을 고르는 규칙은 그대로이고, 마이그레이션마다 트랜잭션을 하나씩 두며 `SET LOCAL lock_timeout = '3s'`를 건다(55P03이면 세 번까지 다시). drizzle migrator는 전부를 한 트랜잭션에서 돌려 `CONCURRENTLY`와 잠금 대기 한도를 쓸 수 없다. (AI 판단)
-95. 파일 첫 줄이 `-- 트랜잭션 밖`인 마이그레이션은 트랜잭션 없이 문장을 하나씩 보낸다. 모든 문장은 다시 해도 같은 결과여야 한다. `CREATE INDEX CONCURRENTLY`는 `DROP INDEX CONCURRENTLY IF EXISTS` 다음에 쓰고 `IF NOT EXISTS`는 쓰지 않는다(실패로 남은 INVALID 인덱스를 건너뛴다). 실행기는 끝에 INVALID 인덱스가 없는지 본다. (AI 판단)
-96. 무중단 마이그레이션 예시는 둘이다. `holds(performance_id)`를 `CONCURRENTLY`로 만든다(관리자 판매 현황, 10장 65). `orders.paid_at`(결제 확정 시각)을 expand → contract로 더한다: nullable 열 → 앱이 씀 → 옛 행을 1,000행씩 채우는 명령 → `CHECK … NOT VALID` → `VALIDATE` → 읽기(`OrderView`·내 예매의 `paidAt`). `updated_at`은 바뀔 때마다 덮여 결제 시각을 지키지 못한다. 부하 중 리허설(보통 `CREATE INDEX`와 `CONCURRENTLY`, `lock_timeout` 있이·없이의 잠금 줄)은 탐색 한 번의 참고 숫자다. (AI 판단)
-97. C8 합격은 논리 백업(소유자 `pg_dump -Fc` → 새 DB에 `pg_restore -j`)으로 판정한다. 조용한 부하 템플릿(112MB)에서 표마다 행 수와 checksum(`sum(hashtextextended(t::text, 0))`), identity 시퀀스의 다음 값이 같아야 한다. 함께 확인하는 것은 셋이다: 백업 시작 뒤의 쓰기가 복구본에 없다, 통계가 없어 계획이 달라진다, role은 따로 받아야 한다. 숫자는 덤프 크기·덤프 시간·복구 시간이다. (AI 판단)
-98. 물리 백업과 시점 복구는 참고이고 시간을 정해 둔다. 서비스를 다시 띄우거나 설정을 바꾸지 않는다(`ALTER SYSTEM`도 쓰지 않는다). 그래서 `archive_mode` 대신 슬롯 없는 `pg_receivewal`로 WAL을 받고, scratch의 임시 인스턴스(다른 포트)에 `recovery_target_time`으로 복구한 뒤 반드시 멈추고 지운다. 슬롯은 지우지 못하면 WAL이 끝없이 쌓여 쓰지 않는다. (AI 판단)
+91. 사용자 서버의 role은 둘이다. 소유자 `seat_booking`(지금 role 그대로, `CREATEDB`)과 앱 `seat_booking_app`(DML만)이다. 슈퍼유저가 앱 role을 만들고 `GRANT seat_booking_app TO seat_booking`을 한다. 이것이 없으면 소유자가 앱 연결이 남은 DB를 `DROP DATABASE … WITH (FORCE)`로 지우지 못하고(42501), `pg_stat_activity`로 앱 세션을 보지 못한다. 환경 변수는 `DATABASE_URL`(앱)과 `DATABASE_OWNER_URL`(소유자)의 쌍이다. 서버·관리자 승격·E2E와 부하의 API·부하 표본기는 앱 role, 마이그레이션·시드·DB 만들기·논리 백업은 소유자다. 슈퍼유저 비밀번호는 앱 role 만들기에만 쓰고 `PGPASSWORD`로 넘긴다. (AI 판단, 리뷰 반영)
+92. 권한은 마이그레이션 0008이 앱 role에 바로 준다: `public`의 `USAGE`, 모든 표의 DML, 소유자가 앞으로 `public`에 만드는 표에 같은 권한(`ALTER DEFAULT PRIVILEGES IN SCHEMA public`). 시퀀스 권한은 주지 않는다(모든 id가 identity 열이고, identity `INSERT`는 시퀀스 권한을 보지 않는다). 마이그레이션을 돌리는 모든 환경에 앱 role이 먼저 있어야 한다. 그룹 role은 두지 않는다(앱 로그인이 하나뿐). 앱 role에게 DDL·`TRUNCATE`·role GRANT는 42501이고, 표의 GRANT·`ANALYZE`·`VACUUM`은 경고만 내고 아무것도 바꾸지 못한다. 임시 표와 `LOCK TABLE`은 된다. (AI 판단, 리뷰 반영)
+93. 테스트는 앱 role로 돈다. global-setup이 소유자로 DB를 만들고 마이그레이션한 뒤 앱 role 주소를 준다. 소유자 주소는 실행 계획 테스트(`ANALYZE`)와 권한 테스트만 받는다. 테스트는 오류 메시지가 아니라 코드로 본다(로컬은 한국어, CI는 영어). (AI 판단)
+94. 마이그레이션 실행기를 직접 둔다. drizzle migrator는 전부를 한 트랜잭션에서 돌려 `CONCURRENTLY`를 쓸 수 없고, 하나가 실패하면 앞의 것까지 되돌아가며, 하나만 다시 할 수 없다. drizzle의 파일·journal·적용 기록 표·남은 것을 고르는 규칙은 그대로 따른다. 거기에 journal과 기록이 어긋나면(마지막 기록보다 작은 `when`이 기록 없이 있으면) 실패하는 검사를 더한다. hash로는 아무것도 정하지 않는다(줄바꿈에 따라 달라진다). 연결 하나로 하고, 그 연결의 role이 DB 소유자이며 슈퍼유저가 아닌지 먼저 본다. 세션 advisory lock을 잡는다. 마이그레이션마다 트랜잭션을 하나씩 두고, 세션에 `lock_timeout = '1s'`를 건다. 앱 쓰기의 잠금 한도(3초)보다 짧아야 그 뒤에 줄 선 앱 쓰기가 자기 한도에 닿지 않는다. 55P03·40P01이면 2·4·8초를 쉬고 세 번까지 다시 한다. (AI 판단, 리뷰 반영)
+95. 파일 첫 줄이 `-- 트랜잭션 밖`인 마이그레이션은 트랜잭션 없이 문장을 하나씩 보내고, 다시 할 때는 파일 처음부터 한다. 모든 문장은 다시 해도 같은 결과여야 한다. `CREATE INDEX CONCURRENTLY`는 `DROP INDEX CONCURRENTLY IF EXISTS` 다음에 쓰고, `IF NOT EXISTS`는 쓰지 않는다(실패로 남은 INVALID 인덱스를 건너뛴다). 실행기는 트랜잭션 밖 마이그레이션마다 INVALID 인덱스를 보고, 있으면 지울 문장을 내고 실패한다. DB에 손대기 전에, 표시 없는 파일에 `CONCURRENTLY`가 있으면 거절한다. `schema.ts`에는 보통 `index()`로 두고 생성된 SQL을 손으로 고친다. (AI 판단, 리뷰 반영)
+96. 무중단 마이그레이션 예시는 둘이다. 하나는 `holds(performance_id)`를 `CONCURRENTLY`로 만드는 것이다(관리자 판매 현황, 10장 65). 다른 하나는 `orders.paid_at`(결제 확정 시각)을 expand → contract로 더하는 것이다: nullable 열 → 앱이 씀 → 옛 paid 주문을 1,000행씩 채우는 명령 → `CHECK … NOT VALID` → `VALIDATE` → 읽기(`OrderView`·내 예매의 `paidAt`). 지금은 paid가 끝 상태라 `updated_at`과 같은데, 그것은 우연한 일치다. 운영 예시로 고른 것이다. 막는 것과 막지 않는 것의 근거는 결정적인 잠금 시험(대기 시간과 오류 코드)으로 남긴다. 큰 표의 인덱스도 0.1초대라 부하 중 1초 지표로는 구별되지 않기 때문이다. 부하 중 리허설은 탐색 한 번의 참고 숫자다. (AI 판단, 리뷰 반영)
+97. C8 합격은 논리 백업으로 판정한다. 부하 템플릿을 복제한 조용한 DB를 소유자로 `pg_dump -Fc` 하고, 새 DB에 `pg_restore -j 4`로 복구한다. 표마다(`public`, `drizzle`) 행 수와 checksum(`sum(hashtextextended(t::text, 0))`, `TimeZone` UTC·`DateStyle` ISO로 잼)이 같고, 시퀀스마다 `last_value`·`is_called`가 같아야 한다. 템플릿에서 바로 덤프하지 않는다. "스냅샷 뒤의 쓰기가 없다"는 `pg_export_snapshot()`과 `pg_dump --snapshot`으로 결정적으로 보인다(시퀀스는 스냅샷을 따르지 않아 뺀다). 통계는 18의 기본값으로는 담기지 않는다(`--statistics`로 담을 수 있다). 숫자는 덤프 크기·덤프 시간·복구 시간이다. (AI 판단, 리뷰 반영)
+98. 물리 백업과 시점 복구는 리허설 클러스터에서 하는 참고이고, 시간을 정해 둔다. 리허설 클러스터는 `initdb`로 만들고, 다른 포트에서 127.0.0.1만 듣게 띄운다. 사용자 서버에는 `REPLICATION` role을 두지 않는다. 그 권한은 클러스터의 모든 파일(비밀번호 해시 포함)을 읽는다. 서비스 설정을 바꾸지 않는다는 조건은 그대로 두고, WAL은 영구 슬롯 없는 `pg_receivewal`로 받는다. 판정은 `pg_ctl`의 성공이 아니라 로그(`recovery stopping before commit`)로 한다. 목표 없는 복구와 목표 T 복구를 짝으로 본다. T는 오프셋을 붙인 `clock_timestamp()`이고, 마지막 쓰기 뒤에도 `pg_switch_wal()`을 한다. 리뷰 실험에서 WAL이 모자라거나 Windows `restore_command`가 틀린 경우 모두 오류 없이 행을 잃었다. 끝에 클러스터와 받기를 반드시 멈추고 지운다. (AI 판단, 리뷰 반영)
