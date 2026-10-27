@@ -56,7 +56,12 @@ describe("3단계 표의 제약", () => {
     it("상태는 pending·paid·cancelled만, 취소 이유는 취소된 주문에만 있다(23514)", async () => {
       const { orderId } = await newOrder();
       const update = (status: string, reason: string | null) =>
-        pool.query("update orders set status = $2, cancel_reason = $3 where id = $1", [orderId, status, reason]);
+        // paid에는 확정 시각을 넣어, 보려는 제약만 걸리게 한다
+        pool.query("update orders set status = $2, cancel_reason = $3, paid_at = case when $2 = 'paid' then now() end where id = $1", [
+          orderId,
+          status,
+          reason,
+        ]);
 
       await expect(update("refunded", null)).rejects.toMatchObject({ code: "23514", constraint: "orders_status_valid" });
       await expect(update("cancelled", null)).rejects.toMatchObject({
@@ -72,6 +77,14 @@ describe("3단계 표의 제약", () => {
         constraint: "orders_cancel_reason_valid",
       });
       await expect(update("cancelled", "expired")).resolves.toMatchObject({ rowCount: 1 });
+    });
+
+    it("paid 주문에는 결제 확정 시각이 있다(23514)", async () => {
+      const { orderId } = await newOrder();
+      const pay = (paidAt: string | null) =>
+        pool.query("update orders set status = 'paid', paid_at = $2 where id = $1", [orderId, paidAt]);
+      await expect(pay(null)).rejects.toMatchObject({ code: "23514", constraint: "orders_paid_at_set" });
+      await expect(pay(new Date().toISOString())).resolves.toMatchObject({ rowCount: 1 });
     });
 
     it("금액은 음수가 아니다(23514)", async () => {

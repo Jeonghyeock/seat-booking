@@ -146,8 +146,9 @@ describe("결제 요청, 웹훅, 결제 확정", () => {
     expect(view).toMatchObject({ status: "paid", payments: [{ paymentId: res.paymentId, status: "succeeded" }] });
     expect(view.tickets.map((t) => t.seatId)).toEqual(hold.seatIds);
     // 결제 확정 시각은 확정한 트랜잭션의 시각이다(updated_at과 같다)
-    const { rows: paid } = await admin.query("select paid_at = updated_at as same from orders where id = $1", [order.orderId]);
+    const { rows: paid } = await admin.query("select paid_at = updated_at as same, paid_at from orders where id = $1", [order.orderId]);
     expect(paid[0].same).toBe(true);
+    expect(view.paidAt).toBe(paid[0].paid_at.toISOString());
   });
 
   it("본문 없이 보내도 기본값(success)으로 결제한다", async () => {
