@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import type pg from "pg";
+import { withDatabase } from "../db/databases.js";
 import { createPool } from "../db/pool.js";
 import { checkLeftovers } from "./checks.js";
 import {
@@ -25,11 +26,12 @@ import {
   summarizeK6,
 } from "./report.js";
 import { snapshotStats, type StatsSnapshot, startActivitySampler } from "./samplers.js";
-import { cloneLoadDatabase, readLoadData, RESULTS_DIR, setSalesOpen, verifyTemplateFiles } from "./template.js";
+import { cloneLoadDatabase, LOAD_DATABASE, readLoadData, RESULTS_DIR, setSalesOpen, verifyTemplateFiles } from "./template.js";
 
 // 부하 측정 한 번(DESIGN 6.6). 템플릿 복제 → API 띄우기(IPC, P코어) → 표본기 → k6(E코어) → (S1이면) 조용해질 때까지 기다리기
 // → API 닫기 → 요약과 C2 판정을 load/results/runs/<시각>-<이름>/에 쓴다. 중간에 실패해도 자식 프로세스를 정리하고 보고서를 남긴다.
-// DATABASE_URL은 같은 서버의 아무 DB 주소다. 부하 DB 이름은 template.ts가 정한다.
+// DATABASE_URL(앱)과 DATABASE_OWNER_URL(소유자)은 같은 서버의 아무 DB 주소다. 부하 DB 이름은 template.ts가 정한다.
+// 복제는 소유자로 하고, API·표본기·확인은 앱 role로 한다(표본기의 pg_stat_activity는 같은 role의 세션만 자세히 보인다).
 
 const { values: args } = parseArgs({
   options: {
@@ -53,6 +55,8 @@ const { values: args } = parseArgs({
 
 const baseUrl = process.env.DATABASE_URL;
 if (!baseUrl) throw new Error("DATABASE_URL이 없습니다(.env 또는 환경 변수)");
+const ownerUrl = process.env.DATABASE_OWNER_URL;
+if (!ownerUrl) throw new Error("DATABASE_OWNER_URL이 없습니다(.env 또는 환경 변수)");
 const scenarios = (args.scenarios ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 if (scenarios.length === 0) throw new Error("--scenarios가 없습니다(s1, s2, s3 중 쉼표로)");
 // S1은 사용자 i가 쿠키 i를 쓰고, 끝나면 조용해질 때까지 기다린 뒤 C2를 본다. 다른 시나리오와 섞으면 사용자와 판정이 겹친다.
@@ -160,7 +164,8 @@ let after: StatsSnapshot | null = null;
 let baseline: Phase | null = null;
 
 try {
-  const loadUrl = await cloneLoadDatabase(baseUrl);
+  await cloneLoadDatabase(ownerUrl);
+  const loadUrl = withDatabase(baseUrl, LOAD_DATABASE);
   // 이 작업 트리의 load/results 파일이 서버의 템플릿과 같은 것에서 나왔는지 본다.
   const cookies = JSON.parse(readFileSync(path.join(resultsDir, "cookies.json"), "utf8")) as string[];
   await verifyTemplateFiles(loadUrl, cookies[0]!, data.userIds[0]!);

@@ -7,19 +7,18 @@ import { defineConfig, devices } from "@playwright/test";
 const API_PORT = 3101;
 const WEB_ORIGIN = "http://127.0.0.1:5174";
 
-// DB 주소는 환경 변수(CI), 없으면 저장소 .env에서 DATABASE_URL 하나만 읽는다(슈퍼유저 비밀번호를 webServer로 퍼뜨리지 않게).
-function baseDatabaseUrl() {
-  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
+// DB 주소는 환경 변수(CI), 없으면 저장소 .env에서 앱·소유자 주소 두 키만 읽는다(슈퍼유저 비밀번호를 webServer로 퍼뜨리지 않게).
+const envFile = (() => {
   const file = new URL("../../.env", import.meta.url);
-  const url = existsSync(file) ? parseEnv(readFileSync(file, "utf8")).DATABASE_URL : undefined;
-  if (!url) throw new Error("DATABASE_URL이 없습니다(.env 또는 환경 변수)");
-  return url;
-}
-const e2eDatabaseUrl = (() => {
-  const u = new URL(baseDatabaseUrl());
+  return existsSync(file) ? parseEnv(readFileSync(file, "utf8")) : {};
+})();
+function e2eDatabaseUrl(key: "DATABASE_URL" | "DATABASE_OWNER_URL") {
+  const url = process.env[key] ?? envFile[key];
+  if (!url) throw new Error(`${key}가 없습니다(.env 또는 환경 변수)`);
+  const u = new URL(url);
   u.pathname = "/seat_booking_e2e";
   return u.toString();
-})();
+}
 
 const repoRoot = new URL("../..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 
@@ -34,14 +33,16 @@ export default defineConfig({
   webServer: [
     {
       // DB 준비(지우기·만들기·마이그레이션·시드)는 API를 띄우는 명령 안에서 한다. Playwright는 globalSetup보다 webServer를 먼저 띄운다.
-      // --env-file은 넘기지 않은 키를 .env에서 채우므로 쓰지 않고, API가 읽는 키 여덟 개를 모두 준다.
+      // 준비는 소유자(DATABASE_OWNER_URL), API는 앱 role(DATABASE_URL)로 접속한다. 두 명령이 env를 함께 받는다.
+      // --env-file은 넘기지 않은 키를 .env에서 채우므로 쓰지 않고, 준비와 API가 읽는 키 아홉 개를 모두 준다.
       command: "npm run e2e:prepare -w @seat-booking/api && npm run e2e:serve -w @seat-booking/api",
       cwd: repoRoot,
       url: `http://127.0.0.1:${API_PORT}/health`,
       reuseExistingServer: false,
       timeout: 120_000,
       env: {
-        DATABASE_URL: e2eDatabaseUrl,
+        DATABASE_URL: e2eDatabaseUrl("DATABASE_URL"),
+        DATABASE_OWNER_URL: e2eDatabaseUrl("DATABASE_OWNER_URL"),
         PORT: String(API_PORT),
         HOST: "127.0.0.1",
         APP_ORIGIN: WEB_ORIGIN,

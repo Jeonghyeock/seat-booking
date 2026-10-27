@@ -2,10 +2,12 @@ import type { TestProject } from "vitest/node";
 import { dropDatabase, withAdminClient, withDatabase } from "../src/db/databases.js";
 import { runMigrations } from "../src/db/migrate.js";
 
+// 테스트는 앱 role(DML만)로 돈다. DB 만들기와 마이그레이션, 소유자만 되는 일(ANALYZE, 권한 확인)은 소유자 주소로 한다(DESIGN 6.7).
 declare module "vitest" {
   export interface ProvidedContext {
     databaseUrl: string;
     isolatedDatabaseUrl: string;
+    ownerDatabaseUrl: string;
   }
 }
 
@@ -21,8 +23,9 @@ export default async function setup(project: TestProject) {
   } catch {
     // CI는 환경 변수로 준다.
   }
-  const baseUrl = process.env.DATABASE_URL;
-  if (!baseUrl) throw new Error("DATABASE_URL이 없습니다(.env 또는 환경 변수)");
+  const appUrl = process.env.DATABASE_URL;
+  const baseUrl = process.env.DATABASE_OWNER_URL;
+  if (!appUrl || !baseUrl) throw new Error("DATABASE_URL과 DATABASE_OWNER_URL이 없습니다(.env 또는 환경 변수)");
 
   const testDb = `seat_booking_test_${process.pid}`;
   // 표 전체를 훑어 바꾸는 작업(정리 작업)을 시험하는 파일만 쓰는 DB. 다른 테스트 파일이 동시에 만든 행을 건드리지 않게 따로 둔다.
@@ -43,8 +46,9 @@ export default async function setup(project: TestProject) {
       await client.query("SELECT pg_advisory_unlock($1)", [SETUP_LOCK]);
     }
   });
-  project.provide("databaseUrl", withDatabase(baseUrl, testDb));
-  project.provide("isolatedDatabaseUrl", withDatabase(baseUrl, isolatedDb));
+  project.provide("databaseUrl", withDatabase(appUrl, testDb));
+  project.provide("isolatedDatabaseUrl", withDatabase(appUrl, isolatedDb));
+  project.provide("ownerDatabaseUrl", withDatabase(baseUrl, testDb));
 
   return async () => {
     await withAdminClient(baseUrl, async (client) => {

@@ -37,16 +37,34 @@ jobs:
           rc=0
           grep -rIni --include='*.ts' --exclude='*.test.ts' 'x-user-id' apps/api/src packages/shared/src || rc=$?
           test "$rc" -eq 1
-      # 로컬과 같게 슈퍼유저가 아닌 앱 role로 마이그레이션과 테스트를 돌린다.
-      # 비밀번호는 실행마다 새로 만들어, 저장소에 비밀번호 글자가 남지 않게 한다.
-      - name: 앱 role과 DB 만들기(README의 로컬 준비와 같음)
+      # 소유자 주소는 마이그레이션·시드·테스트와 E2E·부하 준비만 읽는다(DESIGN 6.7). 서버와 앱 코드는 앱 role(DML만)이다.
+      - name: DATABASE_OWNER_URL을 읽는 곳이 정해진 파일뿐인지
         run: |
+          found="$(grep -rIl --include='*.ts' --exclude-dir=node_modules 'DATABASE_OWNER_URL' apps packages | sort)"
+          expected="$(printf '%s\n' \
+            apps/api/src/db/e2e-prepare-cli.ts \
+            apps/api/src/db/migrate-cli.ts \
+            apps/api/src/db/seed-cli.ts \
+            apps/api/src/load/run-cli.ts \
+            apps/api/src/load/template-cli.ts \
+            apps/api/test/global-setup.ts \
+            apps/web/playwright.config.ts)"
+          test "$found" = "$expected" || { echo "$found"; exit 1; }
+      # 로컬과 같게 슈퍼유저가 아닌 role 둘(소유자, 앱)로 마이그레이션과 테스트를 돌린다.
+      # 비밀번호는 실행마다 새로 만들어, 저장소에 비밀번호 글자가 남지 않게 한다.
+      - name: role과 DB 만들기(README의 로컬 준비와 같음)
+        run: |
+          OWNER_PASSWORD="$(openssl rand -hex 16)"
           APP_PASSWORD="$(openssl rand -hex 16)"
+          echo "::add-mask::$OWNER_PASSWORD"
           echo "::add-mask::$APP_PASSWORD"
           psql -h localhost -U postgres -v ON_ERROR_STOP=1 \
-            -c "CREATE ROLE seat_booking LOGIN CREATEDB PASSWORD '$APP_PASSWORD'" \
-            -c "CREATE DATABASE seat_booking OWNER seat_booking"
-          echo "DATABASE_URL=postgres://seat_booking:$APP_PASSWORD@localhost:5432/seat_booking" >> "$GITHUB_ENV"
+            -c "CREATE ROLE seat_booking LOGIN CREATEDB PASSWORD '$OWNER_PASSWORD'" \
+            -c "CREATE DATABASE seat_booking OWNER seat_booking" \
+            -c "CREATE ROLE seat_booking_app LOGIN PASSWORD '$APP_PASSWORD'" \
+            -c "GRANT seat_booking_app TO seat_booking"
+          echo "DATABASE_URL=postgres://seat_booking_app:$APP_PASSWORD@localhost:5432/seat_booking" >> "$GITHUB_ENV"
+          echo "DATABASE_OWNER_URL=postgres://seat_booking:$OWNER_PASSWORD@localhost:5432/seat_booking" >> "$GITHUB_ENV"
       - run: npm run db:migrate -w @seat-booking/api
       - run: npm test
       # 화면을 묶을 수 있는지(Vite가 shared의 TS 원본까지 묶는다). typecheck와 단위 테스트는 워크스페이스로 위에서 돈다.
@@ -75,14 +93,19 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - name: 앱 role 만들기(README의 로컬 준비와 같음)
+      - name: role 만들기(README의 로컬 준비와 같음)
         run: |
+          OWNER_PASSWORD="$(openssl rand -hex 16)"
           APP_PASSWORD="$(openssl rand -hex 16)"
+          echo "::add-mask::$OWNER_PASSWORD"
           echo "::add-mask::$APP_PASSWORD"
           psql -h localhost -U postgres -v ON_ERROR_STOP=1 \
-            -c "CREATE ROLE seat_booking LOGIN CREATEDB PASSWORD '$APP_PASSWORD'" \
-            -c "CREATE DATABASE seat_booking OWNER seat_booking"
-          echo "DATABASE_URL=postgres://seat_booking:$APP_PASSWORD@localhost:5432/seat_booking" >> "$GITHUB_ENV"
+            -c "CREATE ROLE seat_booking LOGIN CREATEDB PASSWORD '$OWNER_PASSWORD'" \
+            -c "CREATE DATABASE seat_booking OWNER seat_booking" \
+            -c "CREATE ROLE seat_booking_app LOGIN PASSWORD '$APP_PASSWORD'" \
+            -c "GRANT seat_booking_app TO seat_booking"
+          echo "DATABASE_URL=postgres://seat_booking_app:$APP_PASSWORD@localhost:5432/seat_booking" >> "$GITHUB_ENV"
+          echo "DATABASE_OWNER_URL=postgres://seat_booking:$OWNER_PASSWORD@localhost:5432/seat_booking" >> "$GITHUB_ENV"
       # 브라우저는 캐시하지 않는다(복원이 내려받기와 비슷하게 걸리고, apt 의존성은 캐시할 수 없다).
       - run: npx playwright install --with-deps --only-shell chromium
         working-directory: apps/web

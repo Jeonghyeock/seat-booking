@@ -8,8 +8,9 @@ import { readSeedFile, SAMPLE_SEED, seedInto, shiftSeed } from "./seed.js";
 // 날짜는 지금에 맞춰 옮긴다(가장 이른 판매 시작이 지난 24시간 안). 약 4주 뒤 판매가 끝나면 다시 돌린다.
 // id는 처음부터 다시 세지 않는다(restart identity 없음). 켜 둔 API의 가짜 결제사 메모리와 탭에 남은 멱등 키가
 // 새 주문·결제의 id와 겹치지 않게 한다(DESIGN 10장 71).
-const url = process.env.DATABASE_URL;
-if (!url) throw new Error("DATABASE_URL이 없습니다(.env 또는 환경 변수)");
+// 비우기(truncate)는 표의 주인만 할 수 있어 소유자 주소로 접속한다.
+const url = process.env.DATABASE_OWNER_URL;
+if (!url) throw new Error("DATABASE_OWNER_URL이 없습니다(.env 또는 환경 변수)");
 
 const data = shiftSeed(readSeedFile(SAMPLE_SEED), new Date());
 const pool = createPool({ connectionString: url });
