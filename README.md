@@ -14,14 +14,19 @@ TypeScript · Fastify · Drizzle ORM · PostgreSQL 18 · zod · Vitest · React 
 
 필요: Node.js 22.22 이상(24.x 권장), PostgreSQL 18.
 
-앱은 슈퍼유저가 아니라 전용 role로 접속한다. 슈퍼유저로 psql에 들어가 한 번만 만든다. `CREATEDB`는 테스트가 DB를 복제하는 데 쓴다.
+슈퍼유저가 아닌 role 둘로 접속한다. 슈퍼유저로 psql에 들어가 한 번만 만든다.
+- 소유자 `seat_booking`: 표의 주인이다. 마이그레이션·시드·테스트 준비가 쓴다. `CREATEDB`는 테스트가 DB를 복제하는 데 쓴다.
+- 앱 `seat_booking_app`: 서버가 쓴다. DML만 하고, 권한은 마이그레이션이 준다.
+- 마지막 줄은 소유자가 앱 연결이 남은 테스트 DB를 지울 수 있게 한다.
 
 ```sql
 CREATE ROLE seat_booking LOGIN CREATEDB PASSWORD '비밀번호';
 CREATE DATABASE seat_booking OWNER seat_booking;
+CREATE ROLE seat_booking_app LOGIN PASSWORD '다른 비밀번호';
+GRANT seat_booking_app TO seat_booking;
 ```
 
-`.env.example`을 `.env`로 복사하고 `DATABASE_URL`의 비밀번호를 채운 뒤 실행한다. 화면을 쓰려면 `.env`에 `APP_ORIGIN=http://localhost:5173`과 `COOKIE_SECURE=false`가 있어야 한다(없으면 화면의 모든 POST가 403이다).
+`.env.example`을 `.env`로 복사하고 `DATABASE_URL`(앱)과 `DATABASE_OWNER_URL`(소유자)의 비밀번호를 채운 뒤 실행한다. 화면을 쓰려면 `.env`에 `APP_ORIGIN=http://localhost:5173`과 `COOKIE_SECURE=false`가 있어야 한다(없으면 화면의 모든 POST가 403이다).
 
 ```sh
 npm ci

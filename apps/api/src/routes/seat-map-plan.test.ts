@@ -16,8 +16,10 @@ function indexesUsed(node: PlanNode): string[] {
 // 표가 작으면 PostgreSQL은 인덱스 대신 표 전체를 읽는 편이 싸다고 보므로, 회차를 300개로 늘려 재고가 3만 행쯤 되게 한 뒤 본다.
 describe("좌석 지도 조회의 실행 계획", () => {
   const pool = createPool({ connectionString: inject("databaseUrl") });
+  // ANALYZE는 표의 주인만 한다(앱 role은 경고만 내고 건너뛴다)
+  const owner = createPool({ connectionString: inject("ownerDatabaseUrl"), max: 1 });
   const db = createDb(pool);
-  afterAll(() => pool.end());
+  afterAll(() => Promise.all([pool.end(), owner.end()]));
 
   it("회차 하나의 재고를 (performance_id, seat_id) 기본 키 인덱스로 찾는다", async () => {
     const { venueId, performanceIds } = await seed(db, readSeedFile(SAMPLE_SEED));
@@ -37,7 +39,7 @@ describe("좌석 지도 조회의 실행 계획", () => {
        select more.id, s.id from more, seats s where s.venue_id = $1`,
       [venueId, performanceIds[0]],
     );
-    await pool.query("analyze performance_seats, seats, performance_grades");
+    await owner.query("analyze performance_seats, seats, performance_grades");
 
     const query = new PgDialect().sqlToQuery(seatMapSql(performanceIds[0]!));
     const { rows } = await pool.query<{ "QUERY PLAN": [{ Plan: PlanNode }] }>(

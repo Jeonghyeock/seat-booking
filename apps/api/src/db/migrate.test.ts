@@ -10,7 +10,8 @@ import { dropDatabase, withAdminClient, withDatabase } from "./databases.js";
 import { NO_TRANSACTION_MARKER, readMigrations, runMigrations } from "./migrate.js";
 
 const repoFolder = fileURLToPath(new URL("../../drizzle", import.meta.url));
-const baseUrl = inject("databaseUrl");
+// DB를 만들고 마이그레이션하는 것은 소유자다.
+const baseUrl = inject("ownerDatabaseUrl");
 const folders: string[] = [];
 let created = 0;
 
@@ -86,6 +87,13 @@ describe("마이그레이션 실행기", () => {
     expect(await runMigrations(url)).toEqual(migrations.map((m) => m.tag));
     expect(await records(url)).toEqual(migrations.map((m) => ({ hash: m.hash, created_at: String(m.when) })));
     expect(await runMigrations(url)).toEqual([]);
+  });
+
+  it("DB 소유자가 아닌 role(앱)로는 돌리지 않는다", async () => {
+    const url = await freshDatabase();
+    const appUrl = withDatabase(inject("databaseUrl"), new URL(url).pathname.slice(1));
+    await expect(runMigrations(appUrl, { folder: folderWith([table]) })).rejects.toThrow(/DB 소유자/);
+    expect(await query(url, "select to_regnamespace('drizzle') is null as no_schema")).toEqual([{ no_schema: true }]);
   });
 
   it("drizzle로 앞부분을 적용한 DB를 이어받는다", async () => {

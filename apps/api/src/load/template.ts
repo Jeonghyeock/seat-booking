@@ -50,7 +50,7 @@ export async function buildLoadTemplate(baseUrl: string, shape: LoadShape): Prom
   }
 }
 
-// 템플릿을 복제해 측정 한 번의 DB를 새로 만든다. FILE_COPY는 스스로 checkpoint를 건다(앱 role은 CHECKPOINT를 할 수 없다).
+// 템플릿을 복제해 측정 한 번의 DB를 새로 만든다. FILE_COPY는 스스로 checkpoint를 건다(소유자 role도 CHECKPOINT를 할 수 없다).
 // 복제본은 통계와 visibility map을 이어받고, 누적 통계(pg_stat_*)는 0부터다.
 export async function cloneLoadDatabase(baseUrl: string) {
   await withAdminClient(baseUrl, async (client) => {
