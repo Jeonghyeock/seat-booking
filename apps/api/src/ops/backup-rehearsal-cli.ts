@@ -1,11 +1,11 @@
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { dropDatabase, withAdminClient, withDatabase } from "../db/databases.js";
 import { RESULTS_DIR, TEMPLATE_DATABASE } from "../load/template.js";
+import { cleanupOnce, libpqEnv, removeDir, runTool } from "./pg-tools.js";
 
 // 논리 백업·복구 리허설(DESIGN 6.7 "백업·복구 리허설" 1, C8 판정). 소유자로 돈다.
 // 부하 템플릿을 복제한 조용한 DB를 pg_dump -Fc로 덤프하고 빈 새 DB에 pg_restore -j 4로 복구한 뒤,
@@ -17,30 +17,7 @@ const SNAPSHOT_RESTORED = "seat_booking_backup_snap";
 
 const ownerUrl = process.env.DATABASE_OWNER_URL;
 if (!ownerUrl) throw new Error("DATABASE_OWNER_URL이 없습니다(.env 또는 환경 변수)");
-const windowsBin = "C:/Program Files/PostgreSQL/18/bin";
-const bin = process.env.PG_BIN ?? (existsSync(windowsBin) ? windowsBin : "");
-const tool = (name: string) => (bin ? path.join(bin, name) : name);
-
-// 비밀번호를 명령줄에 두지 않게 libpq 환경 변수로 넘긴다.
-function pgEnv(database: string) {
-  const u = new URL(ownerUrl!);
-  return {
-    ...process.env,
-    PGHOST: u.hostname,
-    PGPORT: u.port || "5432",
-    PGUSER: decodeURIComponent(u.username),
-    PGPASSWORD: decodeURIComponent(u.password),
-    PGDATABASE: database,
-    LC_MESSAGES: "C",
-  };
-}
-function run(name: string, args: string[], database: string) {
-  const started = performance.now();
-  const r = spawnSync(tool(name), args, { env: pgEnv(database), encoding: "utf8" });
-  const ms = Math.round(performance.now() - started);
-  if (r.error) throw r.error;
-  return { status: r.status, ms, stderr: r.stderr.trim() };
-}
+const run = (name: string, args: string[], database: string) => runTool(name, args, libpqEnv(ownerUrl, database));
 
 async function withClient<T>(database: string, work: (client: pg.Client) => Promise<T>) {
   const client = new pg.Client({ connectionString: withDatabase(ownerUrl!, database) });
@@ -105,7 +82,20 @@ async function planStats(database: string) {
   });
 }
 
+// 복구할 빈 DB는 template0에서 만든다(template1에 무엇이 생기면 복구가 부딪힌다).
+const createEmpty = (db: string) => withAdminClient(ownerUrl, (client) => client.query(`CREATE DATABASE ${db} TEMPLATE template0`));
+
 const work = mkdtempSync(path.join(tmpdir(), "seat-booking-backup-"));
+// 한 DB를 못 지워도 나머지와 작업 폴더는 지운다.
+const cleanup = cleanupOnce(async () => {
+  await withAdminClient(ownerUrl, async (client) => {
+    for (const db of [SOURCE, RESTORED, SNAPSHOT_RESTORED]) {
+      await dropDatabase(client, db).catch((err: Error) => console.error(`${db}을(를) 지우지 못했습니다: ${err.message}`));
+    }
+  }).catch((err: Error) => console.error(`DB 정리에 실패했습니다: ${err.message}`));
+  removeDir(work);
+});
+
 const report: Record<string, unknown> = { at: new Date().toISOString() };
 try {
   await withAdminClient(ownerUrl, async (client) => {
@@ -123,16 +113,26 @@ try {
   const dumpFile = path.join(work, "source.dump");
   const dump = run("pg_dump", ["-Fc", "-f", dumpFile], SOURCE);
   if (dump.status !== 0) throw new Error(`pg_dump 실패: ${dump.stderr}`);
-  await withAdminClient(ownerUrl, (client) => client.query(`CREATE DATABASE ${RESTORED}`));
+  await createEmpty(RESTORED);
   const restore = run("pg_restore", ["-j", "4", "-d", RESTORED, dumpFile], "postgres");
   const restored = await fingerprint(RESTORED);
   const diffs = differences(source, restored);
+  const sizes = await withClient(SOURCE, async (client) => {
+    const { rows } = await client.query<{ db: string; dump: string; bytes: string }>(
+      "select pg_size_pretty(pg_database_size(current_database())) as db, pg_size_pretty($1::bigint) as dump, pg_database_size(current_database())::text as bytes",
+      [statSync(dumpFile).size],
+    );
+    return rows[0]!;
+  });
   report.c8 = {
     pass: restore.status === 0 && diffs.length === 0,
     tables: Object.keys(source.tables).length,
     rows: Object.values(source.tables).reduce((n, t) => n + Number(t.rows), 0),
     sequences: Object.keys(source.sequences).length,
     diffs,
+    databaseSize: sizes.db,
+    databaseBytes: Number(sizes.bytes),
+    dumpSize: sizes.dump,
     dumpBytes: statSync(dumpFile).size,
     dumpMs: dump.ms,
     restoreMs: restore.ms,
@@ -171,19 +171,22 @@ try {
     const snapDump = run("pg_dump", ["-Fc", `--snapshot=${snapshot}`, "-f", snapFile], SOURCE);
     await exporter.query("commit");
     if (snapDump.status !== 0) throw new Error(`스냅샷 pg_dump 실패: ${snapDump.stderr}`);
-    await withAdminClient(ownerUrl, (client) => client.query(`CREATE DATABASE ${SNAPSHOT_RESTORED}`));
-    run("pg_restore", ["-d", SNAPSHOT_RESTORED, snapFile], "postgres");
+    await createEmpty(SNAPSHOT_RESTORED);
+    const snapRestore = run("pg_restore", ["-d", SNAPSHOT_RESTORED, snapFile], "postgres");
     const seen = await withClient(SNAPSHOT_RESTORED, async (client) => ({
       inserted: (await client.query("select 1 from venues where id = $1", [changed.inserted])).rowCount,
       updated: (await client.query("select 1 from venues where id = $1 and name like '%(백업 뒤에 고침)'", [changed.updated])).rowCount,
     }));
-    // 시퀀스는 스냅샷을 따르지 않고 덤프하는 순간의 값이다. 그래서 위 대조는 조용한 DB에서만 한다.
-    const snapSeq = (await fingerprint(SNAPSHOT_RESTORED)).sequences["public.venues_id_seq"];
+    // 복구본의 표는 스냅샷 때(위 source)와 같아야 한다. 시퀀스는 스냅샷을 따르지 않고 덤프하는 순간의 값이라 뺀다.
+    const snap = await fingerprint(SNAPSHOT_RESTORED);
+    const snapDiffs = differences(source, snap, { sequences: false });
     report.snapshot = {
-      pass: seen.inserted === 0 && seen.updated === 0,
+      pass: snapRestore.status === 0 && snapDiffs.length === 0 && seen.inserted === 0 && seen.updated === 0,
+      restoreStatus: snapRestore.status,
+      tableDiffs: snapDiffs,
       insertedRowInBackup: seen.inserted,
       updatedRowInBackup: seen.updated,
-      venuesSeqInBackup: snapSeq,
+      venuesSeqInBackup: snap.sequences["public.venues_id_seq"],
       venuesSeqAtSnapshot: source.sequences["public.venues_id_seq"],
     };
   } finally {
@@ -196,19 +199,22 @@ try {
   const globalsText = globals.status === 0 ? readFileSync(globalsFile, "utf8") : "";
   report.globals = {
     status: globals.status,
-    roles: [...globalsText.matchAll(/^CREATE ROLE (\S+);/gm)].map((m) => m[1]),
-    hasPasswords: /PASSWORD '/.test(globalsText),
+    roles: globalsText
+      .split("\n")
+      .filter((line) => line.startsWith("CREATE ROLE "))
+      .map((line) => line.slice("CREATE ROLE ".length).replace(";", "").trim()),
+    hasPasswords: globalsText.includes("PASSWORD '"),
     withPasswords: run("pg_dumpall", ["--globals-only", "-f", path.join(work, "globals-pw.sql")], "postgres").status,
   };
 } finally {
-  await withAdminClient(ownerUrl, async (client) => {
-    for (const db of [SOURCE, RESTORED, SNAPSHOT_RESTORED]) await dropDatabase(client, db);
-  });
-  rmSync(work, { recursive: true, force: true });
+  await cleanup();
 }
 
+const pass = (report.c8 as { pass: boolean }).pass && (report.snapshot as { pass: boolean }).pass;
+report.pass = pass;
 mkdirSync(RESULTS_DIR, { recursive: true });
 const out = fileURLToPath(new URL(`backup-${String(report.at).replace(/[-:]/g, "").slice(0, 15)}.json`, RESULTS_DIR));
 writeFileSync(out, JSON.stringify(report, null, 2));
 console.log(JSON.stringify(report, null, 2));
 console.log(`기록: ${out}`);
+if (!pass) process.exitCode = 1;

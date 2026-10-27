@@ -12,7 +12,7 @@ seat-booking의 PostgreSQL을 운영하는 절차입니다(7단계, 설계는 [D
 
 - **만들기**: 슈퍼유저가 한 번 합니다(README "로컬 실행"). 마지막 줄 `GRANT seat_booking_app TO seat_booking`이 있어야 소유자가 앱 연결이 남은 DB를 지울 수 있습니다(`DROP DATABASE … WITH (FORCE)`).
 - **환경 변수**: `DATABASE_URL`은 앱, `DATABASE_OWNER_URL`은 소유자입니다. 소유자 주소를 읽는 파일은 CI가 정해 둔 목록과 견줍니다.
-- **비밀**: `dev`·`start` 스크립트는 `.env` 전체를 서버 프로세스에 올립니다. 그래서 앱의 `.env`에는 슈퍼유저 비밀번호를 두지 않습니다. 이 PC의 `.env`에는 7단계 리허설 때문에 있습니다.
+- **비밀**: `dev`·`start` 스크립트는 `.env` 전체를 서버 프로세스에 올립니다. 그래서 슈퍼유저 비밀번호는 role을 만든 뒤 `.env`에 두지 않습니다. 저장소의 어떤 코드도 그것을 읽지 않습니다. 리허설 스크립트는 자식 프로세스에 실행에 필요한 환경 변수만 넘깁니다.
 
 ### 왜 앱 계정에서 DDL 권한을 빼나
 - **피해의 크기를 행으로 묶는다.** 앱이 뚫리거나 버그가 나도 표를 지우거나(`DROP`, `TRUNCATE`) 모양을 바꾸지(`ALTER`) 못합니다. 남는 피해는 앱이 원래 하는 DML입니다.
@@ -39,7 +39,10 @@ seat-booking의 PostgreSQL을 운영하는 절차입니다(7단계, 설계는 [D
     - `schema.ts`에는 보통 `index()`로 둡니다.
   - 트랜잭션 밖 마이그레이션의 문장은 다시 해도 같은 결과여야 합니다. 실패하면 파일 처음부터 다시 돕니다.
   - `CREATE INDEX CONCURRENTLY IF NOT EXISTS`는 쓰지 않습니다. 실패로 남은 INVALID 인덱스를 건너뜁니다.
-- **INVALID 인덱스가 남았다고 실패하면**: 출력된 `DROP INDEX CONCURRENTLY IF EXISTS …;`를 소유자로 돌리고 `db:migrate`를 다시 돌립니다. INVALID 인덱스는 계획에 쓰이지 않으면서 쓰기마다 유지됩니다.
+- **INVALID 인덱스가 남았다고 실패하면**: 출력된 `DROP INDEX CONCURRENTLY IF EXISTS …;`를 소유자로 돌리고 `db:migrate`를 다시 돌립니다. INVALID 인덱스는 계획에 쓰이지 않으면서 쓰기마다 유지될 수 있습니다(`indisready`가 참이면). 유일 인덱스면 새 중복도 막습니다.
+- **백업 중에는 마이그레이션을 돌리지 않습니다.**
+  - `pg_dump`는 덤프하는 동안 표마다 `ACCESS SHARE`를 쥡니다. 그래서 `ALTER`는 1초 뒤 물러나고, 세 번 다시 한 뒤 실패합니다.
+  - `CONCURRENTLY`는 덤프의 스냅샷이 끝나길 기다립니다.
 - **55P03으로 세 번 실패하면**: 오래 쥔 트랜잭션을 찾습니다.
   - `select pid, state, xact_start, query from pg_stat_activity where datname = current_database() order by xact_start`
   - `idle in transaction`이 오래 남아 있으면 그것이 원인입니다.
@@ -84,6 +87,8 @@ CI의 `lock-rehearsal.test.ts`가 결정적으로 확인합니다. 부하 중 �
 
 ## 백업과 복구
 
+두 리허설은 결과를 `load/results/backup-<시각>.json`, `load/results/pitr-<시각>.json`(gitignore)에 씁니다. 판정에 실패하면 종료 코드 1로 끝납니다. 저장소에 남는 기록은 이 문서의 표입니다.
+
 ### 논리 백업: C8
 `npm run ops:backup-rehearsal -w @seat-booking/api`(소유자로 돕니다)
 
@@ -92,23 +97,43 @@ CI의 `lock-rehearsal.test.ts`가 결정적으로 확인합니다. 부하 중 �
 2. `pg_dump -Fc`로 덤프하고, 빈 새 DB에 `pg_restore -j 4`로 복구합니다.
 3. 표마다(`public`, `drizzle`) 행 수와 `sum(hashtextextended(t::text, 0))`, 시퀀스마다 `last_value`·`is_called`를 견줍니다. `timestamptz`의 글자가 세션에 따라 달라지므로 양쪽 모두 `TimeZone` UTC, `DateStyle` ISO로 잽니다.
 
-결과(2026-10-27): **합격**
+결과(2026-10-27, 세 번 돌려 모두 합격. 시간은 범위): **합격**
 
 | 항목 | 값 |
 |---|---|
 | 대조 | 표 16개(773,515행), 시퀀스 10개, 차이 0 |
-| DB 크기 / 덤프 크기 | 112MB / 5.0MB |
-| 덤프 시간 / 복구 시간(`-j 4`) | 0.73초 / 0.88초 |
-| 통계 | 복구본 `pg_stats` 0행, 좌석 재고 추정 1,352행(실제 2,000). `ANALYZE` 뒤 66행, 추정 1,989행 |
+| DB 크기 / 덤프 크기(`pg_size_pretty`) | 114MB / 4.8MB |
+| 덤프 시간 / 복구 시간(`-j 4`) | 0.72~0.82초 / 0.88~1.11초 |
+| 통계 | 복구본 `pg_stats` 0행, 좌석 재고 추정 1,352행(실제 2,000). `ANALYZE` 뒤 66행, 추정 1,989~1,998행 |
 | 스냅샷 뒤의 쓰기 | 백업에 없음(넣은 행, 고친 행 모두) |
 | 시퀀스 | 스냅샷을 따르지 않음(스냅샷 때 1, 백업에는 2) |
 | role | DB 백업에 없음. 비슈퍼유저는 `pg_dumpall --globals-only --no-role-passwords`만 됨(비밀번호까지는 실패) |
 
 복구한 뒤 할 일:
 - `ANALYZE`를 돌립니다. 18의 `pg_dump`는 기본값으로 통계를 담지 않습니다(`--statistics`로 담을 수 있습니다).
-- 대상 클러스터에 role이 먼저 있어야 권한(0008)까지 복구됩니다. 없으면 `pg_restore`가 권한 문장에서 실패하고, 데이터만 들어갑니다.
+- 대상 클러스터에 role이 먼저 있어야 권한(0008)까지 복구됩니다. 없으면 GRANT와 기본 권한 문장만 실패하고(종료 코드 1), 표·인덱스·제약·데이터는 들어갑니다.
 - 옛 백업으로 되돌렸다면 시퀀스를 넉넉히 앞으로 옮깁니다. 결제 id가 결제사 쪽 멱등 키라, 되감긴 id로 만든 새 결제에 결제사가 옛 결과를 돌려줍니다.
+  - 예: `select setval(pg_get_serial_sequence('payments', 'id'), <결제사가 본 가장 큰 결제 id> + 10000)`
 - 결제사 쪽 기록과 대조합니다. 대사는 DB에 남은 `requested` 결제에서 시작하므로, 복구로 사라진 결제는 보지 못합니다.
+
+#### 정기 백업
+- 서비스 DB를 소유자로 덤프합니다.
+  - 명령: `pg_dump -Fc --lock-wait-timeout=10s -f seat_booking-<날짜>.dump -d seat_booking`
+  - 비밀번호는 `PGPASSWORD`나 `pgpass`로 넘깁니다.
+- 간격이 곧 RPO입니다. 이 PC의 서비스 DB는 WAL을 보관하지 않으므로(아래) RPO는 이 간격입니다.
+- 작업 스케줄러로 돌리고, 덤프를 다른 디스크나 다른 PC로 복사합니다. 같은 디스크의 백업은 재해에 쓸 수 없습니다.
+- 받은 뒤에는 `pg_restore --list`로 열어 보고, 정기적으로 위 리허설처럼 실제로 복구해 대조합니다. 열리지 않는 백업은 백업이 아닙니다.
+- 덤프도 비밀로 다룹니다. `users.password_hash`와 `sessions.token_hash`가 들어 있습니다.
+
+#### 서비스 DB로 복구하는 순서
+1. 앱을 멈춥니다. 복구한 DB는 백업 뒤에 팔린 좌석이 비어 있습니다. 대조 전에 앱을 열면 이미 결제된 좌석을 다시 팝니다. 서버의 멱등 키(`idempotency_keys`)도 함께 되감깁니다.
+2. 대상 클러스터에 role 둘이 있는지 봅니다. 없으면 README "로컬 실행"대로 만듭니다.
+3. 새 DB를 만듭니다: `CREATE DATABASE seat_booking_restored TEMPLATE template0 OWNER seat_booking`
+4. `pg_restore -j 4 -d seat_booking_restored <파일>`로 복구하고, 종료 코드가 0인지 봅니다.
+5. `ANALYZE`를 돌립니다. 원본 표에 autovacuum을 끈 설정이 있었으면 켭니다.
+6. 결제 시퀀스를 앞으로 옮기고, 결제사 쪽 기록과 대조합니다.
+7. 연결이 없을 때 이름을 바꿉니다: `ALTER DATABASE seat_booking RENAME TO seat_booking_old`, `ALTER DATABASE seat_booking_restored RENAME TO seat_booking`
+8. 앱을 띄웁니다.
 
 ### 물리 백업과 시점 복구
 `npm run ops:pitr-rehearsal -w @seat-booking/api`
@@ -122,17 +147,20 @@ CI의 `lock-rehearsal.test.ts`가 결정적으로 확인합니다. 부하 중 �
 4. 표시 행을 넣고, 커밋 뒤 따로 `clock_timestamp()`로 시각 T를 잽니다(오프셋 포함). WAL을 전환합니다.
 5. T 뒤에 또 쓰고, 한 번 더 전환합니다. 그 세그먼트가 `.partial` 없이 받아질 때까지 기다립니다.
 6. 백업 사본 둘을 복구합니다. 하나는 목표 없이, 하나는 `recovery_target_time = T`와 `recovery_target_action = 'pause'`입니다.
+7. 판정: 행이 맞고, 로그에 FATAL이 없고, 복구한 WAL 파일이 있고, T 쪽 로그에 `recovery stopping before commit`이 있어야 합니다.
 
-결과(2026-10-27): **합격**
+실제로 되돌릴 때는 pause 상태에서 행을 확인한 뒤 `select pg_wal_replay_resume()`으로 복구를 끝냅니다(승격). T가 틀렸으면 그 사본을 버리고 새 사본에 다른 T로 다시 합니다.
+
+결과(2026-10-27, 세 번 돌려 모두 합격. 시간은 범위): **합격**
 
 | 항목 | 값 |
 |---|---|
-| 기본 백업 / 검증 | 1.7초 / 0.14초 |
-| 목표 없이 복구 | 2.6초, 행 셋(백업 안, T 전, T 뒤), 받은 WAL 파일 4개 |
-| T로 복구 | 2.1초, 행 둘(백업 안, T 전), 로그에 `recovery stopping before commit` |
-| 백업 role | 백업은 받고, 표는 읽지 못함 |
+| 기본 백업 / 검증 | 1.7~1.8초 / 0.14초 |
+| 목표 없이 복구 | 2.1~2.6초, 행 셋(백업 안, T 전, T 뒤), 받은 WAL 파일 4개 |
+| T로 복구 | 2.0~2.1초, 행 둘(백업 안, T 전), 로그에 `recovery stopping before commit` |
+| 백업 role | 백업은 받고, 표(`orders` 포함)는 읽지 못함 |
 
-함정(리뷰 실험에서 모두 오류 없이 행을 잃었습니다):
+함정(앞의 넷은 리뷰 실험에서 오류 없이 행을 잃었습니다):
 - `pg_ctl -w start`의 성공은 복구가 끝났다는 뜻이 아닙니다.
   - hot standby가 연결을 받는 순간 돌아옵니다. WAL이 모자라 로그에 FATAL이 있어도 그렇습니다.
   - 그래서 로그(`recovery stopping before commit`, `restored log file` 줄 수)와 `pg_get_wal_replay_pause_state()`로 판정합니다.
@@ -148,7 +176,10 @@ CI의 `lock-rehearsal.test.ts`가 결정적으로 확인합니다. 부하 중 �
 
 - **시점**
   - 논리 백업은 스냅샷 뒤의 모든 쓰기를 잃습니다. RPO는 백업 간격입니다.
-  - 물리 백업과 WAL은 받지 못한 WAL(마지막 `.partial`, 받기의 지연)만 잃습니다.
+  - 물리 백업과 WAL은 받지 못한 WAL을 잃습니다.
+    - 받기의 지연: `pg_receivewal`은 기본값으로 WAL 파일을 닫을 때만 디스크에 씁니다. 받는 쪽 OS가 죽으면 마지막 세그먼트(최대 16MB)를 잃을 수 있습니다(`--synchronous`로 줄입니다).
+    - 슬롯 없는 받기의 빈 구간: 받기가 끊긴 동안 서버가 WAL을 지우면, 다음 기본 백업 전까지는 그 앞까지만 복구됩니다. 다시 붙을 때 "already been removed"로 드러나므로 바로 새 기본 백업을 받습니다.
+  - 이 PC의 서비스 DB는 WAL을 보관하지 않습니다. 사용자 서버에 `REPLICATION` role을 두지 않았고, `archive_mode`는 서비스를 다시 띄워야 켜집니다. 그래서 실제 RPO는 논리 백업 간격입니다.
   - 같은 PC·같은 디스크의 백업은 재해에 쓸 수 없습니다.
 - **되감기는 것**
   - 세션: 백업 뒤의 로그아웃과 관리자 강등이 무효가 됩니다.
