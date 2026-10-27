@@ -14,12 +14,13 @@ const baseUrl = inject("databaseUrl");
 const databases: string[] = [];
 const folders: string[] = [];
 
+// DB 열두 개를 지운다. 지울 때마다 checkpoint가 돌고 autovacuum이 끝나길 기다리기도 해 기본 10초로는 모자랄 수 있다.
 afterAll(async () => {
   await withAdminClient(baseUrl, async (client) => {
     for (const db of databases) await dropDatabase(client, db);
   });
   for (const dir of folders) rmSync(dir, { recursive: true, force: true });
-});
+}, 60_000);
 
 // 테스트마다 빈 DB를 따로 만든다(마이그레이션은 DB 전체를 바꾼다).
 async function freshDatabase() {
@@ -144,7 +145,7 @@ describe("마이그레이션 실행기", () => {
 
   it("트랜잭션 밖 마이그레이션은 CONCURRENTLY로 인덱스를 만든다(BOM, CRLF 파일도)", async () => {
     const url = await freshDatabase();
-    const sql = `﻿${indexOnV.replaceAll("\n", "\r\n")}`;
+    const sql = `\uFEFF${indexOnV.replaceAll("\n", "\r\n")}`;
     expect(await runMigrations(url, { folder: folderWith([table, { tag: "0001_idx", when: 200, sql }]) })).toEqual([
       "0000_t",
       "0001_idx",
