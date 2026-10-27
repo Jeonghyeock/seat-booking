@@ -29,7 +29,7 @@ export function readMigrations(folder = migrationsFolder): Migration[] {
     // hash는 drizzle처럼 파일 전체의 sha256이다. 줄바꿈(체크아웃마다 다르다)에 따라 달라지므로 기록만 하고 판단에 쓰지 않는다.
     const text = readFileSync(`${folder}/${tag}.sql`).toString();
     // BOM은 PostgreSQL이 구문 오류로 받는다(편집기가 붙일 수 있다).
-    const body = text.replace(/^﻿/, "");
+    const body = text.replace(/^\uFEFF/, "");
     return {
       tag,
       when,
