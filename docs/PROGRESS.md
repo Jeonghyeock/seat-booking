@@ -548,7 +548,7 @@
 | [#52](https://github.com/Jeonghyeock/seat-booking/pull/52) | 배포 2(`CHECK … NOT VALID`, `VALIDATE`, `paidAt` 읽기) |
 | [#53](https://github.com/Jeonghyeock/seat-booking/pull/53) | 부하 중 잠금 리허설과 기록 |
 | [#54](https://github.com/Jeonghyeock/seat-booking/pull/54) | 백업·복구 리허설(C8, 시점 복구)과 운영 문서 |
-| #55 | 7단계 기록 |
+| [#55](https://github.com/Jeonghyeock/seat-booking/pull/55) | 7단계 기록 |
 
 확인한 것:
 - **권한**: 테스트 전체가 앱 role로 돈다.
