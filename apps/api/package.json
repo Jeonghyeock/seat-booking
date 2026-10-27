@@ -17,7 +17,9 @@
     "load:run": "tsx --env-file-if-exists=../../.env src/load/run-cli.ts",
     "load:lock-events": "tsx --env-file-if-exists=../../.env src/load/lock-events-cli.ts",
     "load:lock-report": "tsx src/load/lock-report-cli.ts",
-    "ops:backfill-paid-at": "tsx --env-file-if-exists=../../.env src/ops/backfill-paid-at-cli.ts"
+    "ops:backfill-paid-at": "tsx --env-file-if-exists=../../.env src/ops/backfill-paid-at-cli.ts",
+    "ops:backup-rehearsal": "tsx --env-file-if-exists=../../.env src/ops/backup-rehearsal-cli.ts",
+    "ops:pitr-rehearsal": "tsx --env-file-if-exists=../../.env src/ops/pitr-rehearsal-cli.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.3",
