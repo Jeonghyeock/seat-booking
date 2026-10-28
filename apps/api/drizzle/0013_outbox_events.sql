@@ -9,7 +9,6 @@ CREATE TABLE "outbox_events" (
 	"parked_at" timestamp with time zone,
 	"park_reason" text,
 	"attempts" integer DEFAULT 0 NOT NULL,
-	CONSTRAINT "outbox_events_event_id_unique" UNIQUE("event_id"),
 	CONSTRAINT "outbox_events_name_valid" CHECK ("outbox_events"."event_name" in ('seats_held', 'order_created', 'payment_succeeded')),
 	CONSTRAINT "outbox_events_sent_or_parked" CHECK ("outbox_events"."sent_at" is null or "outbox_events"."parked_at" is null),
 	CONSTRAINT "outbox_events_park_reason_with_parked" CHECK (("outbox_events"."parked_at" is null) = ("outbox_events"."park_reason" is null))
