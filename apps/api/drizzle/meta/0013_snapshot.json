@@ -1,5 +1,5 @@
 {
-  "id": "2ae8b01f-4e4d-4018-98a3-83e0721c02b7",
+  "id": "a5de81c5-6b51-47c9-be3b-b902eeb5739b",
   "prevId": "7adb657c-ecfa-4671-a60c-abd7b97d6899",
   "version": "7",
   "dialect": "postgresql",
@@ -616,15 +616,7 @@
       },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "outbox_events_event_id_unique": {
-          "name": "outbox_events_event_id_unique",
-          "nullsNotDistinct": false,
-          "columns": [
-            "event_id"
-          ]
-        }
-      },
+      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
         "outbox_events_name_valid": {

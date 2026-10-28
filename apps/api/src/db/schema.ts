@@ -415,7 +415,8 @@ export const outboxEvents = pgTable(
     check("outbox_events_name_valid", sql`${t.eventName} in ('seats_held', 'order_created', 'payment_succeeded')`),
     check("outbox_events_sent_or_parked", sql`${t.sentAt} is null or ${t.parkedAt} is null`),
     check("outbox_events_park_reason_with_parked", sql`(${t.parkedAt} is null) = (${t.parkReason} is null)`),
-    unique("outbox_events_event_id_unique").on(t.eventId),
+    // event_id에는 unique를 두지 않는다. uuidv7()는 겹치지 않고, 받는 쪽이 (event_id, occurred_at)로 거른다.
+    // 가장 뜨거운 선점 트랜잭션에 btree 하나를 더 쓰지 않으려는 것이다(PR #59 리뷰).
     // 릴레이가 보낼 행만 훑는다(커서 없이 매번 id 순으로 고른다, 10장 102).
     index("outbox_events_pending_idx").on(t.id).where(sql`${t.sentAt} is null and ${t.parkedAt} is null`),
     // 보낸 지 7일 지난 행을 지운다(10장 103).
