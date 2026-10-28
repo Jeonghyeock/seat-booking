@@ -86,7 +86,11 @@ describe("paid_at 다시 채우기(expand → contract 3)", () => {
       expect((await pool.query("select id, updated_at from orders order by id")).rows).toEqual(before.rows);
       expect(await backfillPaidAt(pool)).toBe(0);
 
-      expect(await runMigrations(url)).toEqual(["0011_orders_paid_at_check", "0012_orders_paid_at_validate"]);
+      // 뒤에 생긴 마이그레이션(8단계 0013 등)은 이 테스트의 일이 아니므로 0012까지만 본다
+      expect(await runMigrations(url, { folder: folderUpTo("0012_orders_paid_at_validate") })).toEqual([
+        "0011_orders_paid_at_check",
+        "0012_orders_paid_at_validate",
+      ]);
     } finally {
       await pool.end();
     }

@@ -2,6 +2,7 @@ import { type MyPerformance, SEAT_LIMIT_PER_USER } from "@seat-booking/shared";
 import { and, asc, eq, gte, sql } from "drizzle-orm";
 import type { Db, Tx } from "./db/client.js";
 import { holds, orders, performanceSeats, performances } from "./db/schema.js";
+import { recordEvent } from "./outbox.js";
 
 // 선점 유지 시간(DESIGN 10장 2).
 export const HOLD_TTL_SECONDS = 5 * 60;
@@ -109,6 +110,9 @@ export async function holdWithinTx(tx: Tx, { userId, performanceId, seatIds }: H
                            (select starts_at from performances where id = ${performanceId}))`,
     })
     .returning({ id: holds.id, expiresAt: holds.expiresAt });
+  // 업무 이벤트(DESIGN 6.8). 좌석을 잠그기 전에 넣어 가장 많이 다투는 좌석 잠금을 한 왕복 더 쥐지 않는다.
+  // 아래에서 좌석이 모자라면 Rejected를 던져 트랜잭션이 되돌아가므로 이벤트도 남지 않는다.
+  await recordEvent(tx, userId, { name: "seats_held", properties: { performanceId, holdId: hold!.id, seats: seatIds.length } });
 
   const { rows } = await tx.execute<{ seat_id: number }>(sql`
     with locked as (
