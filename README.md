@@ -35,6 +35,7 @@ npm run db:seed -w @seat-booking/api      # 샘플 공연장·회차로 개발 D
 npm test                                  # 템플릿 DB를 복제한 테스트 DB에서 돌고, 끝나면 지운다
 npm run dev                               # API: http://127.0.0.1:3001
 npm run dev -w @seat-booking/web          # 화면: http://localhost:5173 (/api를 API로 넘긴다)
+npm run outbox:relay -w @seat-booking/api # 업무 이벤트를 분석 프로젝트로 보낸다(.env의 EVENT_ANALYTICS_URL·_WRITE_KEY, DESIGN 6.8)
 ```
 
 E2E(가입 → 선점 → 결제 → 내 예매)는 E2E 전용 DB(`seat_booking_e2e`)와 다른 포트(API 3101, 화면 5174)로 API와 화면을 직접 띄워 돈다. 처음 한 번 브라우저를 받는다.
