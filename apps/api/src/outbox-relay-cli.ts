@@ -46,8 +46,14 @@ try {
     if (!(await tryRelayLock(client))) {
       console.log("다른 릴레이가 돌고 있어 끝냅니다");
     } else {
-      process.on("SIGINT", () => (stopping = true));
-      process.on("SIGTERM", () => (stopping = true));
+      // 첫 Ctrl+C는 지금 바퀴를 마치고 끝낸다(쉬는 중이면 그 쉼이 끝난 뒤). 두 번째는 바로 끝낸다. 적기 전에 끝나도 다음 실행이 다시 보낸다.
+      // Windows에서는 SIGTERM이 오지 않는다(프로세스를 바로 끝낸다).
+      const onSignal = () => {
+        if (stopping) process.exit(130);
+        stopping = true;
+      };
+      process.on("SIGINT", onSignal);
+      process.on("SIGTERM", onSignal);
       const store = pgStore(client);
       const send = httpSend({ url, writeKey });
       let backoffs = 0;
@@ -61,11 +67,19 @@ try {
         const round = await relayRound(store, send);
         if (round.kind !== "idle") console.log(JSON.stringify({ at: new Date().toISOString(), ...round }));
         if (round.kind === "stop") {
-          console.error("받는 쪽이 401입니다. 쓰기 키(EVENT_ANALYTICS_WRITE_KEY)를 고친 뒤 다시 띄웁니다");
+          console.error(
+            round.reason === "401"
+              ? "받는 쪽이 401입니다. 쓰기 키(EVENT_ANALYTICS_WRITE_KEY)를 고친 뒤 다시 띄웁니다"
+              : `받는 쪽이 봉투를 거절했습니다(${round.reason}). 이 배치는 보관했습니다. 주소와 계약을 확인하고 --unpark로 되살립니다`,
+          );
           process.exitCode = 1;
           break;
         }
-        if (values.once) break;
+        if (values.once) {
+          // 쉬어야 하는 결과(503·네트워크·500)로 끝났으면 성공과 구별되게
+          if (round.kind === "backoff") process.exitCode = 2;
+          break;
+        }
         if (round.kind === "backoff") {
           await sleep(BACKOFF_SECONDS[Math.min(backoffs, BACKOFF_SECONDS.length - 1)]! * 1000);
           backoffs++;

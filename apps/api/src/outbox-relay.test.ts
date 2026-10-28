@@ -18,7 +18,8 @@ import {
 // outbox 릴레이(DESIGN 6.8, C9). 이 파일만 쓰는 DB(relayDatabaseUrl)에서 돈다. 다른 테스트 파일이 만든 outbox 행을 보내지 않게.
 // 받는 쪽은 테스트 안의 가짜 수집 서버다. 실제 HTTP로 보내고, 받는 쪽처럼 (eventId, occurredAt)로 중복을 센다.
 
-type Reply = { status: number; body?: unknown };
+// 응답: 상태와 본문, 연결 끊기(네트워크 오류), 늦게 답하기(시간 초과)
+type Reply = { status: number; body?: unknown } | { destroy: true } | { delayMs: number };
 async function fakeIngest() {
   const stored = new Set<string>();
   const requests: WireEvent[][] = [];
@@ -31,6 +32,15 @@ async function fakeIngest() {
     const next = replies.shift();
     if (next) {
       const r = next(events);
+      if ("destroy" in r) {
+        reply.hijack();
+        req.raw.socket.destroy();
+        return;
+      }
+      if ("delayMs" in r) {
+        await new Promise((resolve) => setTimeout(resolve, r.delayMs));
+        return reply.code(503).send({ code: "busy" });
+      }
       return reply.code(r.status).send(r.body ?? { code: "test" });
     }
     let inserted = 0;
@@ -81,6 +91,8 @@ describe("outbox 릴레이", () => {
     expect((await rows()).every((r) => r.sent && r.attempts === 1)).toBe(true);
     const [first] = ingest.requests[0]!;
     expect(first).toMatchObject({ userId: "1", eventName: "seats_held", platform: "web", properties: { performanceId: 1, holdId: 1, seats: 2 } });
+    // 받는 쪽은 모르는 키를 거절한다(strictObject). 키가 하나 더 붙으면 모두 rejected로 보관되므로 키 집합을 고정한다
+    expect(Object.keys(first!).sort()).toEqual(["eventId", "eventName", "occurredAt", "platform", "properties", "userId"]);
     expect(first!.occurredAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     expect(first!.eventId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
     expect(await relayRound(store(), ingest.send)).toMatchObject({ kind: "idle" });
@@ -112,16 +124,31 @@ describe("outbox 릴레이", () => {
     expect(await relayRound(store(), ingest.send)).toMatchObject({ kind: "sent", inserted: 2 });
   });
 
-  it("받는 쪽이 꺼져 있어도(네트워크 오류) 횟수 제한 없이 기다리고 보관하지 않는다. 켜지면 모두 보낸다", async () => {
-    const down = await fakeIngest();
-    await down.close();
+  it("연결이 끊기거나(네트워크 오류) 시간이 지나도 횟수 제한 없이 기다리고 보관하지 않는다. 받으면 모두 보낸다", async () => {
+    const ingest = await fakeIngest();
     await addEvents(3);
     for (let i = 0; i < MAX_SERVER_ERRORS + 2; i++) {
-      expect(await relayRound(store(), down.send)).toMatchObject({ kind: "backoff", reason: expect.stringMatching(/^network/) });
+      ingest.replies.push(() => ({ destroy: true }));
+      expect(await relayRound(store(), ingest.send)).toMatchObject({ kind: "backoff", reason: expect.stringMatching(/^network: /) });
     }
+    const slow = httpSend({ url: ingest.url, writeKey: "test-key", timeoutMs: 200 });
+    ingest.replies.push(() => ({ delayMs: 1000 }));
+    expect(await relayRound(store(), slow)).toMatchObject({ kind: "backoff", reason: "timeout" });
     expect((await rows()).every((r) => !r.sent && r.parkReason === null && r.attempts === 0)).toBe(true);
-    const up = await fakeIngest();
-    expect(await relayRound(store(), up.send)).toMatchObject({ kind: "sent", inserted: 3 });
+    expect(await relayRound(store(), ingest.send)).toMatchObject({ kind: "sent", inserted: 3 });
+  });
+
+  it("200이라도 본문이 계약과 맞지 않으면(받은 수가 다름, rejected 위치가 밖) 적지 않고 500처럼 센다", async () => {
+    const ingest = await fakeIngest();
+    await addEvents(2);
+    ingest.replies.push(() => ({ status: 200, body: { received: 1, inserted: 1, duplicates: 0, rejected: [] } }));
+    expect(await relayRound(store(), ingest.send)).toMatchObject({ kind: "backoff", reason: "http_200" });
+    ingest.replies.push(() => ({ status: 200, body: { received: 2, inserted: 1, duplicates: 0, rejected: [{ index: 5, reason: "invalid" }] } }));
+    expect(await relayRound(store(), ingest.send)).toMatchObject({ kind: "backoff", reason: "http_200" });
+    expect((await rows()).map((r) => [r.sent, r.attempts])).toEqual([
+      [false, 2],
+      [false, 2],
+    ]);
   });
 
   it("413이면 반으로 나눠 보내고, 한 건만 보내도 413이면 그 행만 보관한다", async () => {
@@ -138,15 +165,15 @@ describe("outbox 릴레이", () => {
     expect(await rows()).toEqual([{ id: only, sent: false, parkReason: "too_large", attempts: 1 }]);
   });
 
-  it("400은 배치를 보관하고, 401은 아무것도 적지 않고 멈춘다", async () => {
+  it("401은 아무것도 적지 않고 멈추고, 400은 그 배치만 보관하고 멈춘다(어느 배치든 똑같이 날 봉투 오류)", async () => {
     const ingest = await fakeIngest();
     await addEvents(2);
     ingest.replies.push(() => ({ status: 401 }));
     expect(await relayRound(store(), ingest.send)).toMatchObject({ kind: "stop", reason: "401" });
     expect((await rows()).every((r) => !r.sent && r.parkReason === null)).toBe(true);
     ingest.replies.push(() => ({ status: 400 }));
-    expect(await relayRound(store(), ingest.send)).toMatchObject({ kind: "sent", parked: 2 });
-    expect((await rows()).map((r) => r.parkReason)).toEqual(["http_400", "http_400"]);
+    expect(await relayRound(store(), ingest.send, { batchSize: 1 })).toMatchObject({ kind: "stop", reason: "http_400", parked: 1 });
+    expect((await rows()).map((r) => r.parkReason)).toEqual(["http_400", null]);
   });
 
   it("rejected는 보낸 배열 안의 위치로 그 행만 보관하고, 나머지는 적는다", async () => {
@@ -202,9 +229,12 @@ describe("outbox 릴레이", () => {
     const first = await connect();
     const second = await connect();
     onTestFinished(() => second.end());
+    let firstOpen = true;
+    onTestFinished(() => (firstOpen ? first.end() : undefined));
     expect(await tryRelayLock(first)).toBe(true);
     expect(await tryRelayLock(second)).toBe(false);
     await first.end();
+    firstOpen = false;
     // 연결을 닫아도 서버 쪽 프로세스가 끝나며 잠금을 푸는 것은 조금 늦을 수 있다
     let taken = false;
     for (let i = 0; i < 100 && !taken; i++) {
