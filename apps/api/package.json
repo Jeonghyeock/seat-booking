@@ -20,6 +20,7 @@
     "outbox:relay": "tsx --env-file-if-exists=../../.env src/outbox-relay-cli.ts",
     "ops:backfill-paid-at": "tsx --env-file-if-exists=../../.env src/ops/backfill-paid-at-cli.ts",
     "ops:backup-rehearsal": "tsx --env-file-if-exists=../../.env src/ops/backup-rehearsal-cli.ts",
+    "ops:outbox-rehearsal": "tsx --env-file-if-exists=../../.env src/ops/outbox-rehearsal-cli.ts",
     "ops:pitr-rehearsal": "tsx --env-file-if-exists=../../.env src/ops/pitr-rehearsal-cli.ts"
   },
   "dependencies": {
