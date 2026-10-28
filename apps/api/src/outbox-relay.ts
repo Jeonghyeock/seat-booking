@@ -52,11 +52,35 @@ export type SendResult =
 
 export type Send = (events: WireEvent[]) => Promise<SendResult>;
 
-// fetch로 보내는 send. 시간 초과는 10초다.
+// 네트워크 오류의 까닭. fetch는 늘 "fetch failed"라 원인의 코드(ECONNREFUSED, ENOTFOUND 등)를 붙인다.
+const networkReason = (err: unknown) => {
+  const e = err as Error & { cause?: { code?: string } };
+  if (e.name === "TimeoutError") return "timeout";
+  return `network: ${e.cause?.code ?? e.message}`;
+};
+
+// 200의 본문이 계약(event-analytics 6.1)과 맞는지. 맞지 않으면(다른 서버, 잘린 본문) 보낸 것으로 적지 않는다.
+// received가 보낸 수와 같아야 하고, rejected의 index는 보낸 배열 안이어야 한다.
+function parseAccepted(body: unknown, sent: number): Extract<SendResult, { kind: "ok" }> | null {
+  const b = body as { received?: unknown; inserted?: unknown; duplicates?: unknown; rejected?: unknown };
+  if (b === null || typeof b !== "object" || b.received !== sent || !Array.isArray(b.rejected)) return null;
+  if (typeof b.inserted !== "number" || typeof b.duplicates !== "number") return null;
+  const rejected = b.rejected as { index?: unknown; reason?: unknown; message?: unknown }[];
+  if (!rejected.every((r) => Number.isInteger(r.index) && (r.index as number) >= 0 && (r.index as number) < sent)) return null;
+  return {
+    kind: "ok",
+    inserted: b.inserted,
+    duplicates: b.duplicates,
+    rejected: rejected.map((r) => ({ index: r.index as number, reason: String(r.reason), ...(typeof r.message === "string" ? { message: r.message } : {}) })),
+  };
+}
+
+// fetch로 보내는 send. 시간 초과는 10초다(본문을 읽는 동안도 포함). 주소의 경로 접두사는 살린다(…/analytics → …/analytics/ingest).
 export function httpSend({ url, writeKey, timeoutMs = 10_000 }: { url: string; writeKey: string; timeoutMs?: number }): Send {
-  const endpoint = new URL("/ingest", url).toString();
+  const endpoint = new URL("ingest", url.endsWith("/") ? url : `${url}/`).toString();
   return async (events) => {
     let res: Response;
+    let body: unknown;
     try {
       res = await fetch(endpoint, {
         method: "POST",
@@ -64,14 +88,13 @@ export function httpSend({ url, writeKey, timeoutMs = 10_000 }: { url: string; w
         body: JSON.stringify({ events }),
         signal: AbortSignal.timeout(timeoutMs),
       });
+      if (res.status === 200) body = await res.json();
+      else await res.body?.cancel();
     } catch (err) {
-      return { kind: "retry", reason: (err as Error).name === "TimeoutError" ? "timeout" : `network: ${(err as Error).message}` };
+      if (err instanceof SyntaxError) return { kind: "server_error", status: 200 };
+      return { kind: "retry", reason: networkReason(err) };
     }
-    if (res.status === 200) {
-      const body = (await res.json()) as Extract<SendResult, { kind: "ok" }>;
-      return { kind: "ok", inserted: body.inserted, duplicates: body.duplicates, rejected: body.rejected };
-    }
-    await res.body?.cancel();
+    if (res.status === 200) return parseAccepted(body, events.length) ?? { kind: "server_error", status: 200 };
     if (res.status === 503) return { kind: "retry", reason: "503" };
     if (res.status === 400 || res.status === 415) return { kind: "bad_request", status: res.status };
     if (res.status === 401) return { kind: "unauthorized" };
@@ -141,7 +164,7 @@ export function pgStore(client: pg.ClientBase): Store {
 }
 
 export type RoundResult = {
-  // idle: 보낼 것이 없음. sent: 보냄(일부 보관 포함). backoff: 쉬었다 같은 행을 다시. stop: 401
+  // idle: 보낼 것이 없음. sent: 보냄(일부 보관 포함). backoff: 쉬었다 같은 행을 다시. stop: 401, 400·415(사람이 볼 것)
   kind: "idle" | "sent" | "backoff" | "stop";
   rows: number;
   inserted: number;
@@ -183,8 +206,12 @@ export async function relayRound(store: Store, send: Send, { batchSize = BATCH_S
         if (result.kind === "sent") await deliver(part.slice(Math.ceil(part.length / 2)));
         return;
       case "bad_request":
+        // 봉투 오류는 어느 배치를 보내도 똑같이 난다(계약이 바뀌었거나 다른 서비스). 이 배치만 보관하고 멈춰 사람이 보게 한다.
+        // 멈추지 않으면 쌓인 행이 몇 초 만에 모두 보관된다.
         await store.park(part.map((r) => ({ id: r.id, reason: `http_${res.status}` })));
         result.parked += part.length;
+        result.kind = "stop";
+        result.reason = `http_${res.status}`;
         return;
       case "unauthorized":
         result.kind = "stop";
