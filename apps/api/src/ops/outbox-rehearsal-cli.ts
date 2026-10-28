@@ -12,6 +12,7 @@ import { runMigrations } from "../db/migrate.js";
 import { createPool } from "../db/pool.js";
 import { readSeedFile, SAMPLE_SEED, seed, shiftSeed } from "../db/seed.js";
 import { FakePaymentProvider } from "../fake-pay.js";
+import { RELAY_LOCK } from "../outbox-relay.js";
 import { RESULTS_DIR } from "../load/template.js";
 
 // outbox 연결 리허설(DESIGN 6.8, C9, event-analytics 6.9·10장 68). 두 앱을 붙여 업무 이벤트가 빠짐없이 한 번 이상 가고
@@ -19,7 +20,7 @@ import { RESULTS_DIR } from "../load/template.js";
 //   EVENT_ANALYTICS_URL=… EVENT_ANALYTICS_WRITE_KEY=… npm run ops:outbox-rehearsal -w @seat-booking/api [-- --users 60]
 // 1. 이 리허설만 쓰는 새 DB를 만든다(마이그레이션, 지금 판매 중인 샘플 회차). 부하 데이터 DB는 outbox를 거치지 않은 업무 행이 있어 쓰지 않는다.
 // 2. 릴레이를 자식 프로세스로 띄운다.
-// 3. 사용자마다 선점 → (75%) 주문 → (70%) 결제(성공 웹훅). 단계 사이에 생각 시간(20ms)을 둔다(받는 쪽 퍼널은 같은 ms를 빼므로).
+// 3. 사용자마다 선점 → (75%) 주문 → (주문한 사람의 약 73%) 결제(성공 웹훅). 단계 사이에 생각 시간(20ms)을 둔다(받는 쪽 퍼널은 같은 ms를 빼므로).
 // 4. 절반쯤에서 릴레이를 죽이고(SIGKILL) 2초 뒤 다시 띄운다.
 // 5. 끝나면 보낸 행 20개의 sent_at을 지워 "받는 쪽은 저장했는데 적기를 잃은" 상태를 만든다. 릴레이가 다시 보내고, 받는 쪽은 중복으로만 센다.
 // 6. 보낼 행이 0이 되면 릴레이를 멈추고 세 곳을 센다. 다르면 종료 코드 1이다. 결과는 load/results/outbox-rehearsal-<시각>.json.
@@ -27,7 +28,9 @@ const DATABASE = "seat_booking_outbox_rehearsal";
 const RESENT = 20;
 
 const args = process.argv.slice(2);
-const users = Number(args[args.indexOf("--users") + 1] ?? 60) || 60;
+const usersAt = args.indexOf("--users");
+const users = usersAt >= 0 ? Number(args[usersAt + 1]) : 60;
+if (!Number.isInteger(users) || users < 1) throw new Error("--users는 1 이상의 정수입니다");
 const ownerUrl = process.env.DATABASE_OWNER_URL;
 const appUrl = process.env.DATABASE_URL;
 const analyticsUrl = process.env.EVENT_ANALYTICS_URL;
@@ -99,6 +102,17 @@ try {
     if (i === Math.floor(users / 2)) {
       relay.kill("SIGKILL");
       await sleep(2000);
+      // 죽은 릴레이의 잠금이 풀린 뒤에 다시 띄운다(아니면 새 릴레이가 "다른 릴레이가 돌고 있다"며 끝난다).
+      // bigint 키의 advisory lock은 pg_locks에서 objid가 낮은 32비트다.
+      for (let wait = 0; ; wait++) {
+        const { rows } = await pool.query<{ n: number }>(
+          "select count(*)::int as n from pg_locks where locktype = 'advisory' and objid = $1 and objsubid = 1",
+          [RELAY_LOCK],
+        );
+        if (rows[0]!.n === 0) break;
+        if (wait > 100) throw new Error("죽인 릴레이의 잠금이 10초 안에 풀리지 않았습니다");
+        await sleep(100);
+      }
       relay = startRelay();
       relayRestarts++;
     }
@@ -111,7 +125,7 @@ try {
     const ordered = await app.inject({ method: "POST", url: `/holds/${holdId}/orders`, headers: { ...headers, "idempotency-key": randomUUID() } });
     if (ordered.statusCode !== 201) throw new Error(`주문 실패 ${ordered.statusCode} ${ordered.body}`);
     const { orderId } = OrderView.parse(ordered.json());
-    if (i % 10 >= 7) continue; // 주문한 사람 가운데 약 30%는 결제하지 않는다
+    if (i % 10 >= 7) continue; // 결제하지 않는다(위의 25%와 겹쳐, 주문한 사람 가운데 약 27%)
     await sleep(20);
     const paid = await app.inject({
       method: "POST",
@@ -195,7 +209,8 @@ try {
   if (problems.length > 0) process.exitCode = 1;
 } finally {
   relay.kill("SIGTERM");
-  await app.close();
-  await pool.end();
+  // 앞의 정리가 실패해도 DB는 지운다
+  await app.close().catch(() => {});
+  await pool.end().catch(() => {});
   await withAdminClient(ownerUrl, (client) => dropDatabase(client, DATABASE));
 }
