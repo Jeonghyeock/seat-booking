@@ -7,6 +7,7 @@ import { holds, orders, payments, paymentWebhooks, tickets } from "./db/schema.j
 import type { CreateResult, FakePaymentProvider } from "./fake-pay.js";
 import { lockUserPerformance } from "./holds.js";
 import { PAY_MARGIN_SECONDS } from "./orders.js";
+import { recordEvent } from "./outbox.js";
 
 // 결제사 호출의 시간 제한(DESIGN 6.2 결제 요청 2). statement_timeout은 DB 밖의 기다림을 막지 않는다.
 export const PROVIDER_TIMEOUT_MS = 3000;
@@ -284,4 +285,7 @@ async function confirmPayment(tx: Tx, orderId: number, event: PaymentEvent, log:
   await setOrderFromPending(tx, orderId, { status: "paid", paidAt: sql`now()` });
   await setPaymentStatus(tx, event, "requested", "succeeded");
   await tx.insert(tickets).values(seatIds.map((seatId) => ({ orderId, performanceId, seatId })));
+  // 업무 이벤트(DESIGN 6.8). 성공 갈래에서만 넣는다. 위의 환불 갈래들은 값으로 돌아와 커밋되지만 이벤트가 없다.
+  // 웹훅과 대사가 모두 이 함수로 오지만, 주문 행을 잡고 pending일 때만 여기까지 오므로 주문마다 한 번이다.
+  await recordEvent(tx, userId, { name: "payment_succeeded", properties: { performanceId, orderId, paymentId: event.paymentId } });
 }

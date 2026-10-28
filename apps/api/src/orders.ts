@@ -12,6 +12,7 @@ import {
   seats,
   tickets,
 } from "./db/schema.js";
+import { recordEvent } from "./outbox.js";
 import { performanceSummaries, toSummary } from "./routes/performances.js";
 
 // 결제 마감은 선점 만료 30초 전이다(DESIGN 10장 31).
@@ -266,6 +267,8 @@ export function createOrder(
     await tx.insert(orderItems).values(priced.map((s) => ({ orderId: created.id, ...s })));
 
     const view = (await loadOrderView(tx, created.id))!;
+    // 업무 이벤트(DESIGN 6.8). 주문이 실제로 생긴 뒤에만 넣는다. 위의 409(ORDER_EXISTS 등)는 값으로 돌아와 커밋된다.
+    await recordEvent(tx, userId, { name: "order_created", properties: { performanceId: view.performanceId, holdId, orderId: created.id } });
     await beforeCommit(tx, view);
     return { ok: true, view };
   });

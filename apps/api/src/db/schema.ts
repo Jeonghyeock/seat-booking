@@ -384,3 +384,42 @@ export const sessions = pgTable(
     index("sessions_expires_idx").on(t.expiresAt),
   ],
 );
+
+// ── 8단계: 업무 이벤트 outbox(DESIGN 6.8) ──
+
+export const OUTBOX_EVENT_NAMES = ["seats_held", "order_created", "payment_succeeded"] as const;
+
+// 분석 프로젝트로 보낼 업무 이벤트. 업무 쓰기와 같은 트랜잭션에서 넣고, 릴레이가 보낸 뒤 sent_at을 적는다.
+// 키(event_id)와 시각은 DB가 정한다. 키는 받는 쪽의 멱등 키라 다시 보내도 같아야 하고,
+// 시각은 트랜잭션 시작(now())이 아니라 넣는 순간을 ms로 자른 값이다(받는 쪽이 ms로 자른다, 10장 101).
+// 외래 키는 두지 않는다. 그때의 기록이고, 선점 트랜잭션에 부모 행의 KEY SHARE 잠금을 더하지 않는다.
+export const outboxEvents = pgTable(
+  "outbox_events",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    eventId: uuid("event_id").notNull().default(sql`uuidv7()`),
+    occurredAt: timestamp("occurred_at", { withTimezone: true })
+      .notNull()
+      .default(sql`date_trunc('milliseconds', clock_timestamp())`),
+    userId: bigint("user_id", { mode: "number" }).notNull(),
+    eventName: text("event_name", { enum: OUTBOX_EVENT_NAMES }).notNull(),
+    properties: jsonb("properties").notNull(),
+    // 받는 쪽이 200으로 받은 때(저장 또는 중복)
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    // 다시 보내지 않기로 한 때와 까닭(봉투가 틀림, 받는 쪽의 rejected, 500을 너무 많이 받음). 릴레이의 --unpark가 되살린다.
+    parkedAt: timestamp("parked_at", { withTimezone: true }),
+    parkReason: text("park_reason"),
+    attempts: integer("attempts").notNull().default(0),
+  },
+  (t) => [
+    check("outbox_events_name_valid", sql`${t.eventName} in ('seats_held', 'order_created', 'payment_succeeded')`),
+    check("outbox_events_sent_or_parked", sql`${t.sentAt} is null or ${t.parkedAt} is null`),
+    check("outbox_events_park_reason_with_parked", sql`(${t.parkedAt} is null) = (${t.parkReason} is null)`),
+    // event_id에는 unique를 두지 않는다. uuidv7()는 겹치지 않고, 받는 쪽이 (event_id, occurred_at)로 거른다.
+    // 가장 뜨거운 선점 트랜잭션에 btree 하나를 더 쓰지 않으려는 것이다(PR #59 리뷰).
+    // 릴레이가 보낼 행만 훑는다(커서 없이 매번 id 순으로 고른다, 10장 102).
+    index("outbox_events_pending_idx").on(t.id).where(sql`${t.sentAt} is null and ${t.parkedAt} is null`),
+    // 보낸 지 7일 지난 행을 지운다(10장 103).
+    index("outbox_events_sent_idx").on(t.sentAt).where(sql`${t.sentAt} is not null`),
+  ],
+);
