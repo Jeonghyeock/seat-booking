@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
 import { adminKeys, getSales } from "../../api/admin";
-import { LoadError, Loading } from "../../components/States";
+import { LoadError, Loading, refetchRejected, StaleNotice } from "../../components/States";
 import { formatKst, formatWon } from "../../lib/time";
 import { usePageTitle } from "../../lib/usePageTitle";
 import styles from "./Admin.module.css";
@@ -24,7 +24,7 @@ export function SalesPage({ performanceId }: { performanceId: number }) {
     refetchInterval: 15_000,
   });
   if (sales.isPending) return <Loading />;
-  if (sales.isLoadingError) return <LoadError error={sales.error} onRetry={() => void sales.refetch()} />;
+  if (sales.isLoadingError || refetchRejected(sales)) return <LoadError error={sales.error} onRetry={() => void sales.refetch()} />;
 
   const { performance, seats, orders, revenue, payments, serverTime } = sales.data;
   const percent = (n: number) => (seats.total === 0 ? 0 : Math.round((n / seats.total) * 100));
@@ -34,6 +34,7 @@ export function SalesPage({ performanceId }: { performanceId: number }) {
         <Link to="/admin">관리자</Link>
       </p>
       <h1>판매 현황</h1>
+      <StaleNotice query={sales} />
       <p className={styles.muted}>
         {performance.showTitle} · {performance.venueName} · {formatKst(performance.startsAt)} · 예매 마감{" "}
         {formatKst(performance.salesCloseAt)}

@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
 import { getMyOrders } from "../api/endpoints";
 import { queryKeys } from "../api/queries";
-import { LoadError, Loading } from "../components/States";
+import { LoadError, Loading, refetchRejected, StaleNotice } from "../components/States";
 import { orderScreen, orderStatusLabel } from "../lib/orderScreen";
 import { formatKst, formatRemaining, formatWon } from "../lib/time";
 import { useNow } from "../lib/useNow";
@@ -23,12 +23,13 @@ export function MyOrdersPage() {
   const now = useNow(5000);
 
   if (orders.isPending) return <Loading />;
-  if (orders.isLoadingError) return <LoadError error={orders.error} onRetry={() => void orders.refetch()} />;
+  if (orders.isLoadingError || refetchRejected(orders)) return <LoadError error={orders.error} onRetry={() => void orders.refetch()} />;
 
   const { orders: items, hasMore } = orders.data;
   return (
     <section>
       <h1>내 예매</h1>
+      <StaleNotice query={orders} />
       {items.length === 0 ? (
         <p>
           예매한 공연이 없습니다. <Link to="/">공연 보러 가기</Link>

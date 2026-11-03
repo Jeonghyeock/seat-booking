@@ -4,7 +4,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createQueryClient } from "../api/queries";
+import { createQueryClient, queryKeys } from "../api/queries";
 import { OrderPage } from "./OrderPage";
 
 const now = Date.now();
@@ -60,11 +60,13 @@ function renderOrder() {
   const router = createMemoryRouter([{ path: "/orders/:id", element: <OrderPage orderId={1} /> }], {
     initialEntries: ["/orders/1"],
   });
+  const client = createQueryClient();
   render(
-    <QueryClientProvider client={createQueryClient()}>
+    <QueryClientProvider client={client}>
       <RouterProvider router={router} />
     </QueryClientProvider>,
   );
+  return client;
 }
 
 describe("주문 화면", () => {
@@ -135,5 +137,24 @@ describe("주문 화면", () => {
     expect(await screen.findByText("시간이 초과되어 주문이 취소되었습니다.")).toBeTruthy();
     expect(screen.getByRole("link", { name: "좌석 다시 고르기" }).getAttribute("href")).toBe("/performances/3");
     expect(screen.queryByRole("button", { name: /결제하기/ })).toBeNull();
+  });
+  it("주문을 다시 읽다 5xx로 실패하면 보던 화면을 두고 낡았다고 알리고, 4xx면 오류 화면이다(#3 리뷰)", async () => {
+    let status = 200;
+    stubApi(({ url }) => {
+      if (url === "/api/performances") return { status: 200, body: performances(now + 86_400_000) };
+      return status === 200 ? { status, body: baseOrder() } : { status, body: { error: "x", code: status === 404 ? "NOT_FOUND" : "INTERNAL" } };
+    });
+    const client = renderOrder();
+    expect(await screen.findByRole("heading", { name: "주문 1" })).toBeTruthy();
+
+    status = 500; // 잠깐의 장애 — 고른 결제 상황 등이 사라지지 않게 화면을 두고 알린다
+    await client.refetchQueries({ queryKey: queryKeys.order(1) });
+    expect(await screen.findByText(/최신 정보를 불러오지 못했습니다/, {}, { timeout: 3000 })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "주문 1" })).toBeTruthy();
+
+    status = 404; // 주문이 없어졌다 — 마지막 데이터가 더 이상 맞지 않다
+    await client.refetchQueries({ queryKey: queryKeys.order(1) });
+    expect(await screen.findByText("찾을 수 없습니다.")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "주문 1" })).toBeNull();
   });
 });

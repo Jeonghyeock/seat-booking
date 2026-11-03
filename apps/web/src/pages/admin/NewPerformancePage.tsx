@@ -5,7 +5,7 @@ import { Link, useNavigate } from "react-router";
 import { adminKeys, createPerformance, getAdminShows, getAdminVenues } from "../../api/admin";
 import { ApiError, NetworkError } from "../../api/client";
 import { queryKeys } from "../../api/queries";
-import { LoadError, Loading } from "../../components/States";
+import { LoadError, Loading, refetchRejected, StaleNotice } from "../../components/States";
 import { buildCreatePerformance, type FormErrors, type FormField, type PerformanceForm, problemsToErrors } from "../../lib/performanceForm";
 import { defaultSalesClose } from "../../lib/time";
 import { usePageTitle } from "../../lib/usePageTitle";
@@ -66,8 +66,8 @@ export function NewPerformancePage() {
   });
 
   if (venues.isPending || shows.isPending) return <Loading />;
-  if (venues.isLoadingError) return <LoadError error={venues.error} onRetry={() => void venues.refetch()} />;
-  if (shows.isLoadingError) return <LoadError error={shows.error} onRetry={() => void shows.refetch()} />;
+  if (venues.isLoadingError || refetchRejected(venues)) return <LoadError error={venues.error} onRetry={() => void venues.refetch()} />;
+  if (shows.isLoadingError || refetchRejected(shows)) return <LoadError error={shows.error} onRetry={() => void shows.refetch()} />;
 
   const venue = venues.data.venues.find((v) => String(v.venueId) === form.venueId);
   const grades = venue?.grades.map((g) => g.grade) ?? [];
@@ -105,6 +105,8 @@ export function NewPerformancePage() {
         <Link to="/admin">관리자</Link>
       </p>
       <h1>회차 등록</h1>
+      <StaleNotice query={venues} />
+      <StaleNotice query={shows} />
       <form onSubmit={onSubmit} noValidate className={styles.form}>
         <fieldset>
           <legend>작품</legend>

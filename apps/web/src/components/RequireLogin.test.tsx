@@ -1,5 +1,5 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createQueryClient, queryKeys } from "../api/queries";
@@ -48,6 +48,7 @@ describe("로그인·관리자 화면 지킴이", () => {
     fail = true; // 다른 탭에 갔다가 돌아와 다시 읽는데 서버가 5xx(재시도까지 실패)
     await client.refetchQueries({ queryKey: queryKeys.me });
     await waitFor(() => expect(client.getQueryState(queryKeys.me)?.status).toBe("error"), { timeout: 3000 });
+    await act(() => new Promise((r) => setTimeout(r, 50))); // 질의 상태가 바뀐 뒤의 다시 그리기까지 기다린다
     expect(screen.getByRole("heading", { name: "주문" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "관리" })).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();

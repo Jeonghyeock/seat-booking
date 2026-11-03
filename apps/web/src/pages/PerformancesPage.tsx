@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
 import { getPerformances } from "../api/endpoints";
 import { queryKeys } from "../api/queries";
-import { LoadError, Loading } from "../components/States";
+import { LoadError, Loading, refetchRejected, StaleNotice } from "../components/States";
 import { type SalesState, salesState } from "../lib/seats";
 import { formatKst } from "../lib/time";
 import { useNow } from "../lib/useNow";
@@ -29,12 +29,13 @@ export function PerformancesPage() {
   const now = useNow(30_000);
 
   if (performances.isPending) return <Loading />;
-  if (performances.isLoadingError) return <LoadError error={performances.error} onRetry={() => void performances.refetch()} />;
+  if (performances.isLoadingError || refetchRejected(performances)) return <LoadError error={performances.error} onRetry={() => void performances.refetch()} />;
 
   const items = performances.data.performances;
   return (
     <section>
       <h1>공연</h1>
+      <StaleNotice query={performances} />
       {items.length === 0 ? (
         <p>예정된 공연이 없습니다.</p>
       ) : (

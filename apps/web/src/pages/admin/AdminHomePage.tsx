@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
 import { getPerformances } from "../../api/endpoints";
 import { queryKeys } from "../../api/queries";
-import { LoadError, Loading } from "../../components/States";
+import { LoadError, Loading, refetchRejected, StaleNotice } from "../../components/States";
 import { formatKst } from "../../lib/time";
 import { usePageTitle } from "../../lib/usePageTitle";
 import styles from "./Admin.module.css";
@@ -21,9 +21,10 @@ export function AdminHomePage() {
         <Link to="/admin/refunds">환불 실패 목록</Link>
       </nav>
       <h2>판매 현황</h2>
+      <StaleNotice query={performances} />
       {performances.isPending ? (
         <Loading />
-      ) : performances.isLoadingError ? (
+      ) : performances.isLoadingError || refetchRejected(performances) ? (
         <LoadError error={performances.error} onRetry={() => void performances.refetch()} />
       ) : (
         <ul className={styles.list}>
