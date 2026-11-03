@@ -40,8 +40,10 @@ export function buildApp(
   app.setSerializerCompiler(serializerCompiler);
 
   // 풀에서 쉬는 연결이 끊기면(DB 재시작, pg_terminate_backend) 풀이 'error'를 낸다. 듣는 쪽이 없으면 프로세스가 죽는다.
-  // 끊긴 연결은 풀이 버리고 다음 요청에 새로 맺으므로 로그만 남긴다.
-  pool.on("error", (err) => app.log.error({ err }, "풀의 쉬는 연결이 끊김"));
+  // 끊긴 연결은 풀이 버리고 다음 요청에 새로 맺으므로 로그만 남긴다. pg-pool이 오류에 붙인 client(연결 정보 통째)는 싣지 않는다.
+  pool.on("error", (err: Error & { code?: string }) =>
+    app.log.error({ err: { message: err.message, code: err.code } }, "풀의 쉬는 연결이 끊김"),
+  );
 
   app.register(cookie);
   app.decorateRequest("user", null);
