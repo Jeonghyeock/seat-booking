@@ -33,6 +33,19 @@ describe("회차 등록 폼", () => {
     expect(result.ok && result.body.show).toEqual({ title: "햄릿" });
   });
 
+  it("2000~2099년 밖의 시각은 던지지 않고 그 칸의 문구로 돌려준다(#2 리뷰)", () => {
+    // 2000-01-01 08:00 KST 는 UTC 로 1999년이다
+    const result = buildCreatePerformance(form({ startsAt: "2100-01-01T19:00", salesOpenAt: "2000-01-01T08:00", salesCloseAt: "0026-01-01T10:00" }), ["VIP", "R"]);
+    expect(result).toEqual({
+      ok: false,
+      errors: {
+        startsAt: "2000~2099년 사이의 시각이어야 합니다",
+        salesOpenAt: "2000~2099년 사이의 시각이어야 합니다",
+        salesCloseAt: "2000~2099년 사이의 시각이어야 합니다",
+      },
+    });
+  });
+
   it("틀린 칸마다 문구를 준다", () => {
     const result = buildCreatePerformance(
       form({ showMode: "new", title: " ", venueId: "", startsAt: "", prices: { VIP: "-1", R: "1.5" } }),

@@ -48,7 +48,9 @@ export function buildCreatePerformance(
   if (badPrices.length > 0) errors.prices = `가격은 0원 이상 ${PRICE_MAX.toLocaleString("ko-KR")}원 이하 정수입니다: ${badPrices.join(", ")}`;
 
   if (Object.keys(errors).length > 0) return { ok: false, errors };
-  const body = CreatePerformance.parse({
+  // 위 검사를 지나도 API 스키마가 거절할 수 있다(2000~2099년 밖의 시각 등). 던지면 '등록'이 아무 반응도 하지 않았다(#2 리뷰).
+  // CreatePerformance의 키는 모두 폼 칸이라 첫 경로를 그대로 칸으로 쓴다.
+  const parsed = CreatePerformance.safeParse({
     show: form.showMode === "existing" ? { id: Number(form.showId) } : { title },
     venueId: Number(form.venueId),
     startsAt,
@@ -56,7 +58,9 @@ export function buildCreatePerformance(
     salesCloseAt,
     prices,
   });
-  return { ok: true, body };
+  if (parsed.success) return { ok: true, body: parsed.data };
+  for (const issue of parsed.error.issues) errors[issue.path[0] as FormField] ??= issue.message;
+  return { ok: false, errors };
 }
 
 // 422 problems → 칸마다 문구. SHOW_TITLE_EXISTS는 그 작품 id를 함께 돌려 "있는 작품으로 바꾸기"를 보인다.
