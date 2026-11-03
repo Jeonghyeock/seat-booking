@@ -113,12 +113,15 @@ describe("부하 측정 지표(LOAD_STATS)", () => {
   });
 
   it("연결을 받지 못한 것(대기 한도)을 연결 오류로 세고, 새로 맺은 연결 수를 쓴다. 그 오류의 코드는 POOL_TIMEOUT이다", async () => {
-    // 한도는 새 연결을 맺는 시간에도 걸리므로, 첫 연결이 다른 테스트 파일과 겹쳐 늦어도 맺어지게 넉넉히 둔다.
-    const small = createPool({ connectionString: inject("databaseUrl"), max: 1, connectionTimeoutMillis: 1000 });
+    // 한도는 새 연결을 맺는 시간에도 걸린다. 전체 테스트가 함께 돌 때 첫 연결이 1초를 넘겨 실패한 적이 있어,
+    // 첫 연결은 10초 안에 맺게 하고, 연결을 잡은 뒤에만 1초로 줄여 기다리는 둘이 시간 초과가 되게 한다
+    // (pg-pool은 한도를 부를 때마다 options에서 읽는다).
+    const small = createPool({ connectionString: inject("databaseUrl"), max: 1, connectionTimeoutMillis: 10_000 });
     const smallDir = mkdtempSync(path.join(tmpdir(), "load-stats-small-"));
     const smallStats = createLoadStats({ dir: smallDir, pool: small, provider, config, intervalMs: 3_600_000 });
     try {
       const held = await small.connect();
+      small.options.connectionTimeoutMillis = 1000;
       const errors = await Promise.all([small.query("select 1").catch((e: unknown) => e), small.connect().catch((e: unknown) => e)]);
       held.release();
       smallStats.flush();
