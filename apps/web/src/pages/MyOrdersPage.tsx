@@ -23,7 +23,7 @@ export function MyOrdersPage() {
   const now = useNow(5000);
 
   if (orders.isPending) return <Loading />;
-  if (orders.isError) return <LoadError error={orders.error} onRetry={() => void orders.refetch()} />;
+  if (orders.isLoadingError) return <LoadError error={orders.error} onRetry={() => void orders.refetch()} />;
 
   const { orders: items, hasMore } = orders.data;
   return (
