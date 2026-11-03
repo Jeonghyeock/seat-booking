@@ -33,17 +33,24 @@ describe("회차 등록 폼", () => {
     expect(result.ok && result.body.show).toEqual({ title: "햄릿" });
   });
 
-  it("2000~2099년 밖의 시각은 던지지 않고 그 칸의 문구로 돌려준다(#2 리뷰)", () => {
+  it("API가 받지 않는 연도(UTC 2000~2099년 밖)는 던지지 않고, 다른 칸 문구와 함께 그 칸에 한국 시각으로 알린다(#2 리뷰)", () => {
     // 2000-01-01 08:00 KST 는 UTC 로 1999년이다
-    const result = buildCreatePerformance(form({ startsAt: "2100-01-01T19:00", salesOpenAt: "2000-01-01T08:00", salesCloseAt: "0026-01-01T10:00" }), ["VIP", "R"]);
+    const range = "한국 시각 2000-01-01 09:00부터 2100-01-01 09:00 전까지만 등록할 수 있습니다.";
+    const result = buildCreatePerformance(
+      form({ venueId: "", startsAt: "2100-01-01T19:00", salesOpenAt: "2000-01-01T08:00", salesCloseAt: "0026-01-01T10:00" }),
+      ["VIP", "R"],
+    );
     expect(result).toEqual({
       ok: false,
-      errors: {
-        startsAt: "2000~2099년 사이의 시각이어야 합니다",
-        salesOpenAt: "2000~2099년 사이의 시각이어야 합니다",
-        salesCloseAt: "2000~2099년 사이의 시각이어야 합니다",
-      },
+      errors: { venueId: "공연장을 고르세요.", startsAt: range, salesOpenAt: range, salesCloseAt: range },
     });
+    expect(buildCreatePerformance(form({ salesOpenAt: "2000-01-01T09:00" }), ["VIP", "R"]).ok).toBe(true);
+  });
+
+  it("그 밖에 API 스키마가 거절하는 값도 던지지 않고 한국어 문구로 그 칸에 단다", () => {
+    const long = "등".repeat(51); // 공연장 좌석의 등급 이름이 GradeName(50자)보다 길다
+    const result = buildCreatePerformance(form({ prices: { [long]: "1000" } }), [long]);
+    expect(result).toEqual({ ok: false, errors: { prices: "이 값으로는 등록할 수 없습니다. 입력을 확인하세요." } });
   });
 
   it("틀린 칸마다 문구를 준다", () => {
