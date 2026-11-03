@@ -15,10 +15,15 @@ export type PerformanceForm = {
   salesCloseAt: string;
 };
 
-export type FormField = "show" | "venueId" | "prices" | "startsAt" | "salesOpenAt" | "salesCloseAt";
+const FORM_FIELDS = ["show", "venueId", "prices", "startsAt", "salesOpenAt", "salesCloseAt"] as const;
+export type FormField = (typeof FORM_FIELDS)[number];
 export type FormErrors = Partial<Record<FormField, string>>;
 
 const priceOf = (value: string) => (/^\d+$/.test(value.trim()) ? Number(value.trim()) : null);
+
+// API는 회차 시각을 UTC 2000~2099년만 받는다(shared PerformanceTime). 같은 스키마로 보고, 문구는 입력 기준인 한국 시각으로 쓴다.
+const OUT_OF_RANGE = "한국 시각 2000-01-01 09:00부터 2100-01-01 09:00 전까지만 등록할 수 있습니다.";
+const inApiRange = (iso: string) => CreatePerformance.shape.startsAt.safeParse(iso).success;
 
 // 폼 → API 본문. 틀린 칸이 있으면 칸마다 문구다.
 export function buildCreatePerformance(
@@ -35,8 +40,11 @@ export function buildCreatePerformance(
   const salesOpenAt = kstLocalToIso(form.salesOpenAt);
   const salesCloseAt = kstLocalToIso(form.salesCloseAt);
   if (startsAt === null) errors.startsAt = "공연 시작을 입력하세요.";
+  else if (!inApiRange(startsAt)) errors.startsAt = OUT_OF_RANGE;
   if (salesOpenAt === null) errors.salesOpenAt = "판매 시작을 입력하세요.";
+  else if (!inApiRange(salesOpenAt)) errors.salesOpenAt = OUT_OF_RANGE;
   if (salesCloseAt === null) errors.salesCloseAt = "판매 종료를 입력하세요.";
+  else if (!inApiRange(salesCloseAt)) errors.salesCloseAt = OUT_OF_RANGE;
 
   const prices: Record<string, number> = {};
   const badPrices = grades.filter((grade) => {
@@ -48,8 +56,8 @@ export function buildCreatePerformance(
   if (badPrices.length > 0) errors.prices = `가격은 0원 이상 ${PRICE_MAX.toLocaleString("ko-KR")}원 이하 정수입니다: ${badPrices.join(", ")}`;
 
   if (Object.keys(errors).length > 0) return { ok: false, errors };
-  // 위 검사를 지나도 API 스키마가 거절할 수 있다(2000~2099년 밖의 시각 등). 던지면 '등록'이 아무 반응도 하지 않았다(#2 리뷰).
-  // CreatePerformance의 키는 모두 폼 칸이라 첫 경로를 그대로 칸으로 쓴다.
+  // 위 검사를 지나도 API 스키마가 거절하면(공연장 등급 이름이 너무 긺 등) 던지지 않고 칸 문구로 돌려준다 —
+  // 던지면 '등록'이 아무 반응도 하지 않았다(#2 리뷰). zod 기본 문구는 영어라 쓰지 않고, 칸을 모르면 맨 위 칸에 단다.
   const parsed = CreatePerformance.safeParse({
     show: form.showMode === "existing" ? { id: Number(form.showId) } : { title },
     venueId: Number(form.venueId),
@@ -59,7 +67,10 @@ export function buildCreatePerformance(
     prices,
   });
   if (parsed.success) return { ok: true, body: parsed.data };
-  for (const issue of parsed.error.issues) errors[issue.path[0] as FormField] ??= issue.message;
+  for (const issue of parsed.error.issues) {
+    const field = FORM_FIELDS.find((f) => f === issue.path[0]) ?? "show";
+    errors[field] ??= "이 값으로는 등록할 수 없습니다. 입력을 확인하세요.";
+  }
   return { ok: false, errors };
 }
 
