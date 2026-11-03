@@ -59,7 +59,7 @@ describe("GET /health", () => {
       expect(idle.idleCount).toBe(1);
       // 듣는 쪽이 없으면 여기서 'error'가 처리되지 않은 오류로 테스트 실행을 깬다
       const { rows } = await killer.query(
-        "select pg_terminate_backend(pid) as ok from pg_stat_activity where application_name = 'health-idle-test'",
+        "select pg_terminate_backend(pid) as ok from pg_stat_activity where application_name = 'health-idle-test' and datname = current_database()",
       );
       expect(rows).toEqual([{ ok: true }]);
       for (let i = 0; i < 100 && idle.totalCount > 0; i++) await new Promise((r) => setTimeout(r, 20));
