@@ -23,7 +23,7 @@ export function AdminHomePage() {
       <h2>판매 현황</h2>
       {performances.isPending ? (
         <Loading />
-      ) : performances.isError ? (
+      ) : performances.isLoadingError ? (
         <LoadError error={performances.error} onRetry={() => void performances.refetch()} />
       ) : (
         <ul className={styles.list}>

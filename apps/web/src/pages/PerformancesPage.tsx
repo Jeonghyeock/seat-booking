@@ -29,7 +29,7 @@ export function PerformancesPage() {
   const now = useNow(30_000);
 
   if (performances.isPending) return <Loading />;
-  if (performances.isError) return <LoadError error={performances.error} onRetry={() => void performances.refetch()} />;
+  if (performances.isLoadingError) return <LoadError error={performances.error} onRetry={() => void performances.refetch()} />;
 
   const items = performances.data.performances;
   return (

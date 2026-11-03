@@ -55,7 +55,7 @@ export function RefundsPage() {
       )}
       {refunds.isPending ? (
         <Loading />
-      ) : refunds.isError ? (
+      ) : refunds.isLoadingError ? (
         <LoadError error={refunds.error} onRetry={() => void refunds.refetch()} />
       ) : refunds.data.payments.length === 0 ? (
         <p>환불이 실패한 결제가 없습니다.</p>

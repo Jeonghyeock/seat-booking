@@ -219,7 +219,7 @@ export function SeatMapPage({ performanceId }: { performanceId: number }) {
   );
 
   if (seatMap.isPending) return <Loading />;
-  if (seatMap.isError) return <LoadError error={seatMap.error} onRetry={() => void seatMap.refetch()} />;
+  if (seatMap.isLoadingError) return <LoadError error={seatMap.error} onRetry={() => void seatMap.refetch()} />;
 
   const { performance } = seatMap.data;
   const sales = salesState(performance, now);

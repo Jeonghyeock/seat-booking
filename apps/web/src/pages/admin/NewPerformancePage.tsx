@@ -66,8 +66,8 @@ export function NewPerformancePage() {
   });
 
   if (venues.isPending || shows.isPending) return <Loading />;
-  if (venues.isError) return <LoadError error={venues.error} onRetry={() => void venues.refetch()} />;
-  if (shows.isError) return <LoadError error={shows.error} onRetry={() => void shows.refetch()} />;
+  if (venues.isLoadingError) return <LoadError error={venues.error} onRetry={() => void venues.refetch()} />;
+  if (shows.isLoadingError) return <LoadError error={shows.error} onRetry={() => void shows.refetch()} />;
 
   const venue = venues.data.venues.find((v) => String(v.venueId) === form.venueId);
   const grades = venue?.grades.map((g) => g.grade) ?? [];

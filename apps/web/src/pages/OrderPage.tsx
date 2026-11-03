@@ -164,7 +164,7 @@ export function OrderPage({ orderId }: { orderId: number }) {
   });
 
   if (order.isPending) return <Loading />;
-  if (order.isError) return <LoadError error={order.error} onRetry={() => void order.refetch()} />;
+  if (order.isLoadingError) return <LoadError error={order.error} onRetry={() => void order.refetch()} />;
 
   const view = order.data;
   const { main, refunds } = screen!;

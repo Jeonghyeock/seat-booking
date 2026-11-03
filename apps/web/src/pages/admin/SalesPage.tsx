@@ -24,7 +24,7 @@ export function SalesPage({ performanceId }: { performanceId: number }) {
     refetchInterval: 15_000,
   });
   if (sales.isPending) return <Loading />;
-  if (sales.isError) return <LoadError error={sales.error} onRetry={() => void sales.refetch()} />;
+  if (sales.isLoadingError) return <LoadError error={sales.error} onRetry={() => void sales.refetch()} />;
 
   const { performance, seats, orders, revenue, payments, serverTime } = sales.data;
   const percent = (n: number) => (seats.total === 0 ? 0 : Math.round((n / seats.total) * 100));
