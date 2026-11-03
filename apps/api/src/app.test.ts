@@ -49,6 +49,28 @@ describe("GET /health", () => {
       await down.end();
     }
   });
+
+  it("풀의 쉬는 연결이 끊겨도 프로세스가 죽지 않고, 다음 요청에 새로 맺는다", async () => {
+    const idle = createPool({ connectionString: inject("databaseUrl"), application_name: "health-idle-test" });
+    const server = buildApp(idle);
+    const killer = createPool({ connectionString: inject("databaseUrl"), max: 1 });
+    try {
+      expect((await server.inject({ method: "GET", url: "/health" })).statusCode).toBe(200);
+      expect(idle.idleCount).toBe(1);
+      // 듣는 쪽이 없으면 여기서 'error'가 처리되지 않은 오류로 테스트 실행을 깬다
+      const { rows } = await killer.query(
+        "select pg_terminate_backend(pid) as ok from pg_stat_activity where application_name = 'health-idle-test'",
+      );
+      expect(rows).toEqual([{ ok: true }]);
+      for (let i = 0; i < 100 && idle.totalCount > 0; i++) await new Promise((r) => setTimeout(r, 20));
+      expect(idle.totalCount).toBe(0);
+      expect((await server.inject({ method: "GET", url: "/health" })).statusCode).toBe(200);
+    } finally {
+      await server.close();
+      await idle.end();
+      await killer.end();
+    }
+  });
 });
 
 describe("경로 범위", () => {
