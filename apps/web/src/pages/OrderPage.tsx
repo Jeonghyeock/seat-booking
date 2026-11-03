@@ -5,7 +5,7 @@ import { Link } from "react-router";
 import { ApiError, NetworkError } from "../api/client";
 import { cancelOrder, getOrder, getPerformances, requestPayment } from "../api/endpoints";
 import { queryKeys } from "../api/queries";
-import { LoadError, Loading } from "../components/States";
+import { LoadError, Loading, refetchRejected, StaleNotice } from "../components/States";
 import { serverNow } from "../lib/clock";
 import { type OrderMain, orderRefetchInterval, orderScreen, type RefundLine } from "../lib/orderScreen";
 import { formatKst, formatRemaining, formatWon } from "../lib/time";
@@ -164,7 +164,7 @@ export function OrderPage({ orderId }: { orderId: number }) {
   });
 
   if (order.isPending) return <Loading />;
-  if (order.isLoadingError) return <LoadError error={order.error} onRetry={() => void order.refetch()} />;
+  if (order.isLoadingError || refetchRejected(order)) return <LoadError error={order.error} onRetry={() => void order.refetch()} />;
 
   const view = order.data;
   const { main, refunds } = screen!;
@@ -176,6 +176,7 @@ export function OrderPage({ orderId }: { orderId: number }) {
     <section className={styles.page}>
       <header>
         <h1>주문 {view.orderId}</h1>
+        <StaleNotice query={order} />
         {performance && (
           <p className={styles.meta}>
             {performance.showTitle} · {performance.venueName} · <time dateTime={performance.startsAt}>{formatKst(performance.startsAt)}</time>

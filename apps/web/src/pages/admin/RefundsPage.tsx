@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Link } from "react-router";
 import { adminKeys, getRefundFailed, retryRefund } from "../../api/admin";
 import { ApiError } from "../../api/client";
-import { LoadError, Loading } from "../../components/States";
+import { LoadError, Loading, refetchRejected, StaleNotice } from "../../components/States";
 import { formatKst, formatWon } from "../../lib/time";
 import { usePageTitle } from "../../lib/usePageTitle";
 import styles from "./Admin.module.css";
@@ -53,9 +53,10 @@ export function RefundsPage() {
           ))}
         </ul>
       )}
+      <StaleNotice query={refunds} />
       {refunds.isPending ? (
         <Loading />
-      ) : refunds.isLoadingError ? (
+      ) : refunds.isLoadingError || refetchRejected(refunds) ? (
         <LoadError error={refunds.error} onRetry={() => void refunds.refetch()} />
       ) : refunds.data.payments.length === 0 ? (
         <p>환불이 실패한 결제가 없습니다.</p>

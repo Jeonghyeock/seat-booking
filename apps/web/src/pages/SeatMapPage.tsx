@@ -6,7 +6,7 @@ import { ApiError, NetworkError } from "../api/client";
 import { createHold, createOrderFor, getMyPerformance, getSeatMap } from "../api/endpoints";
 import { queryKeys, useMe } from "../api/queries";
 import { SeatGrid, SeatLegend } from "../components/SeatGrid";
-import { LoadError, Loading } from "../components/States";
+import { LoadError, Loading, refetchRejected, StaleNotice } from "../components/States";
 import { serverNow } from "../lib/clock";
 import { loginPath } from "../lib/navigation";
 import { classifyHoldFailure, mySeats, reconcileSelection, salesState } from "../lib/seats";
@@ -219,7 +219,7 @@ export function SeatMapPage({ performanceId }: { performanceId: number }) {
   );
 
   if (seatMap.isPending) return <Loading />;
-  if (seatMap.isLoadingError) return <LoadError error={seatMap.error} onRetry={() => void seatMap.refetch()} />;
+  if (seatMap.isLoadingError || refetchRejected(seatMap)) return <LoadError error={seatMap.error} onRetry={() => void seatMap.refetch()} />;
 
   const { performance } = seatMap.data;
   const sales = salesState(performance, now);
@@ -244,6 +244,7 @@ export function SeatMapPage({ performanceId }: { performanceId: number }) {
     <section className={styles.page}>
       <header className={styles.header}>
         <h1>{performance.showTitle}</h1>
+        <StaleNotice query={seatMap} />
         <p className={styles.meta}>
           {performance.venueName} · <time dateTime={performance.startsAt}>{formatKst(performance.startsAt)}</time>
         </p>
