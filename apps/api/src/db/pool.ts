@@ -10,5 +10,11 @@ pg.types.setTypeParser(pg.types.builtins.INT8, (value: string) => {
 });
 
 export function createPool(config: pg.PoolConfig): pg.Pool {
-  return new pg.Pool(config);
+  const pool = new pg.Pool(config);
+  // pg-pool은 쉬는 연결에만 'error' 리스너를 달고 빌려 줄 때 뗀다. 트랜잭션에 빌려 간 연결이 끊기면(DB 재시작, pg_terminate_backend)
+  // 연결이 낸 'error'를 듣는 쪽이 없어 프로세스가 죽는다. 그래서 새 연결마다 리스너를 달아 둔다(API와 CLI의 풀 모두).
+  // 리스너는 아무것도 하지 않는다. 빌려 간 연결의 오류는 진행 중인 쿼리나 다음 쿼리를 거절해 호출한 쪽에 이미 간다(요청은 500 로그).
+  // 쉬는 연결의 오류는 풀이 'error'로 다시 내고 buildApp이 로그에 남기므로, 여기서도 남기면 두 번 찍힌다.
+  pool.on("connect", (client) => client.on("error", () => {}));
+  return pool;
 }

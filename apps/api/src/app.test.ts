@@ -1,6 +1,8 @@
 import { AuthError } from "@seat-booking/shared";
+import { sql } from "drizzle-orm";
 import { afterAll, describe, expect, inject, it } from "vitest";
 import { buildApp } from "./app.js";
+import { createDb, writeTransaction } from "./db/client.js";
 import { createPool } from "./db/pool.js";
 
 describe("GET /health", () => {
@@ -68,6 +70,52 @@ describe("GET /health", () => {
     } finally {
       await server.close();
       await idle.end();
+      await killer.end();
+    }
+  });
+
+  it("트랜잭션에 빌려 간 연결이 쿼리 사이에 끊겨도 프로세스가 죽지 않고, 그 작업만 실패한다", async () => {
+    const busy = createPool({ connectionString: inject("databaseUrl"), application_name: "health-tx-test" });
+    const server = buildApp(busy);
+    const killer = createPool({ connectionString: inject("databaseUrl"), max: 1 });
+    let paused!: () => void;
+    let resume!: () => void;
+    const reached = new Promise<void>((r) => (paused = r));
+    const gate = new Promise<void>((r) => (resume = r));
+    // 선점·주문·결제·정리 작업이 쓰는 트랜잭션. 첫 문장(한도 설정) 뒤 연결을 쥔 채 멈춘다.
+    const work = writeTransaction(createDb(busy), async (tx) => {
+      paused();
+      await gate;
+      await tx.execute(sql`select 1`);
+    });
+    try {
+      await reached;
+      // 빌려 간 연결에서는 pg-pool이 리스너를 뗀다. 듣는 쪽이 없으면 여기서 연결의 'error'가 처리되지 않은 오류로 테스트 실행을 깬다
+      const { rows } = await killer.query(
+        "select pg_terminate_backend(pid) as ok from pg_stat_activity where application_name = 'health-tx-test' and datname = current_database() and state = 'idle in transaction'",
+      );
+      expect(rows).toEqual([{ ok: true }]);
+      // 백엔드가 끝난 뒤에 이어 간다. 끊김은 다음 쿼리를 보내기 전, 연결을 쥐고 멈춘 동안 온다
+      let left = 1;
+      for (let i = 0; i < 100 && left > 0; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        left = (
+          await killer.query(
+            "select count(*) as n from pg_stat_activity where application_name = 'health-tx-test' and datname = current_database()",
+          )
+        ).rows[0].n;
+      }
+      expect(left).toBe(0);
+      resume();
+      await expect(work).rejects.toThrow();
+      // 끊긴 연결은 돌려줄 때 풀이 버리고, 다음 요청에 새로 맺는다
+      expect(busy.totalCount).toBe(0);
+      expect((await server.inject({ method: "GET", url: "/health" })).statusCode).toBe(200);
+    } finally {
+      resume();
+      await work.catch(() => {});
+      await server.close();
+      await busy.end();
       await killer.end();
     }
   });
