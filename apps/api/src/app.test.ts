@@ -95,7 +95,8 @@ describe("GET /health", () => {
         "select pg_terminate_backend(pid) as ok from pg_stat_activity where application_name = 'health-tx-test' and datname = current_database() and state = 'idle in transaction'",
       );
       expect(rows).toEqual([{ ok: true }]);
-      // 백엔드가 끝난 뒤에 이어 간다. 끊김은 다음 쿼리를 보내기 전, 연결을 쥐고 멈춘 동안 온다
+      // 백엔드가 끝난 뒤에 이어 간다. 이것은 서버 쪽이 끝났다는 것만 보장하고, 이 프로세스가 끊김(FATAL)을 다음 쿼리보다
+      // 먼저 받았는지는 보장하지 않는다. 어느 순서든 연결은 'error'를 낸다
       let left = 1;
       for (let i = 0; i < 100 && left > 0; i++) {
         await new Promise((r) => setTimeout(r, 20));
@@ -117,6 +118,31 @@ describe("GET /health", () => {
       await server.close();
       await busy.end();
       await killer.end();
+    }
+  });
+
+  it("트랜잭션이 연결을 받자마자 끊겨 begin이 실패해도, 그 연결의 풀 자리가 돌아온다", async () => {
+    const one = createPool({ connectionString: inject("databaseUrl"), max: 1, connectionTimeoutMillis: 1000 });
+    const server = buildApp(one);
+    let taken: { release(): void } | undefined;
+    try {
+      expect((await server.inject({ method: "GET", url: "/health" })).statusCode).toBe(200);
+      expect(one.idleCount).toBe(1);
+      // 쉬는 연결을 빌려 주는 순간 그 소켓을 끊는다(DB 재시작·네트워크 끊김). 트랜잭션의 첫 문장 begin이 실패한다
+      one.once("acquire", (client) => {
+        taken = client;
+        (client as unknown as { connection: { stream: { destroy(): void } } }).connection.stream.destroy();
+      });
+      await expect(writeTransaction(createDb(one), async () => {})).rejects.toThrow(/Failed query: begin/);
+      // 돌려받지 못하면 자리가 하나뿐인 이 풀은 막혀, 다음 요청이 연결 대기 1초 끝에 503이 된다
+      expect([one.totalCount, one.idleCount, one.waitingCount]).toEqual([0, 0, 0]);
+      expect((await server.inject({ method: "GET", url: "/health" })).statusCode).toBe(200);
+      expect(one.waitingCount).toBe(0);
+    } finally {
+      // 새어 나간 연결이 남아 있으면(고치기 전) 돌려줘야 풀을 닫을 수 있다
+      if (one.totalCount > one.idleCount) taken?.release();
+      await server.close();
+      await one.end();
     }
   });
 });
